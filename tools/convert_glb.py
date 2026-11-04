@@ -13,15 +13,16 @@ camera is a small decorative body on the wrist, so vertex geometry alone is
 what MuJoCo needs.
 
 Run:
-    python3 convert_glb.py       # writes meshes/realsense/d435.obj
+    python3 tools/convert_glb.py       # writes meshes/realsense/d435.obj
 """
 from __future__ import annotations
 
 import os
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-PKG = os.path.join(HERE, "assets", "galaxea_r1pro_standalone")
+# This script lives in tools/; the robot assets are under the repo root.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PKG = os.path.join(ROOT, "assets", "galaxea_r1pro_standalone")
 SRC = os.path.join(PKG, "meshes", "realsense", "d435.glb")
 DST = os.path.join(PKG, "meshes", "realsense", "d435.obj")
 

@@ -16,8 +16,8 @@ is not a usable *scene*. We need four things the URDF cannot express:
 4. Position/velocity actuators for the controlled joints.
 
 Run:
-    python convert_urdf.py            # writes assets/.../galaxea_r1pro.xml
-    python convert_urdf.py --cameras  # ... galaxea_r1pro_cameras.xml
+    python tools/convert_urdf.py            # writes assets/.../galaxea_r1pro.xml
+    python tools/convert_urdf.py --cameras  # ... galaxea_r1pro_cameras.xml
 
 The default model leaves out the RealSense wrist-camera visual meshes: the
 d435 body is 231k triangles per arm and purely cosmetic. ``--cameras`` writes
@@ -34,8 +34,9 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-PKG = os.path.join(HERE, "assets", "galaxea_r1pro_standalone")
+# This script lives in tools/; the robot assets are under the repo root.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PKG = os.path.join(ROOT, "assets", "galaxea_r1pro_standalone")
 URDF = os.path.join(PKG, "galaxea_r1pro.urdf")
 MJCF = os.path.join(PKG, "galaxea_r1pro.xml")
 # Same robot plus the RealSense visual meshes; see --cameras below.
@@ -126,7 +127,7 @@ def preprocess_urdf(text, cameras=False):
     if cameras:
         if not os.path.exists(os.path.join(PKG, D435_OBJ)):
             raise FileNotFoundError(
-                f"{D435_OBJ} missing — run `python3 convert_glb.py` first")
+                f"{D435_OBJ} missing — run `python3 tools/convert_glb.py` first")
         text = text.replace("meshes/realsense/d435.glb", D435_OBJ)
     else:
         text = re.sub(
@@ -426,7 +427,10 @@ def tune_gains(path):
             d.qpos[m.jnt_qposadr[jid]] = val
     mujoco.mj_forward(m, d)
     M = np.zeros((m.nv, m.nv))
-    mujoco.mj_fullM(m, M, d.qM)
+    try:                                   # MuJoCo >= 3.3: mj_fullM(m, d, dst)
+        mujoco.mj_fullM(m, d, M)
+    except TypeError:                      # older: mj_fullM(m, dst, d.qM)
+        mujoco.mj_fullM(m, M, d.qM)
 
     w, zeta = SERVO_BANDWIDTH, SERVO_DAMPING
     gains = {}

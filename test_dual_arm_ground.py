@@ -21,7 +21,7 @@ import mujoco
 from robot_model import (BASE_JOINTS, TORSO_JOINTS, LEFT_ARM_JOINTS,
                          RIGHT_ARM_JOINTS, LEFT_EE_SITE, RIGHT_EE_SITE,
                          load_model, add_marker, HOME_POSE)
-from wbc_controller import WholeBodyController, quat_error
+from wbc_function import WholeBodyController, quat_error
 
 # 受控自由度：底盘 3 + 躯干 4 + 左臂 7 + 右臂 7（双臂共享躯干与底盘）
 CONTROLLED = BASE_JOINTS + TORSO_JOINTS + LEFT_ARM_JOINTS + RIGHT_ARM_JOINTS
@@ -61,6 +61,7 @@ def main():
     right_target = np.array([right0[0] + 0.15, right0[1] - 0.05, args.ground_z])
     targets_pos = [left_target, right_target]
     targets_quat = [lq0, rq0]
+    targets = {site: (p, q) for site, p, q in zip(EE_SITES, targets_pos, targets_quat)}
 
     print(f"[test] 左臂起始 {np.round(left0, 3)} -> 目标 "
           f"{np.round(left_target, 3)}")
@@ -84,7 +85,8 @@ def main():
 
     try:
         for step in range(args.steps):
-            qd, ep, ea = wbc.compute(targets_pos, targets_quat)
+            qd, err = wbc.compute(targets)
+            ep = [err[site][0] for site in EE_SITES]
             wbc.integrate(qd, dt)
 
             if max(ep) < pos_tol:

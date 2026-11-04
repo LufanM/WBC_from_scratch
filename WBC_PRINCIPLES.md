@@ -4,12 +4,19 @@
 
 **关键问题**：目标可能很远，单靠手臂够不到 → 需要底盘、躯干、手臂**协同运动**。
 
-**物理引擎**：MuJoCo 3.2+ （提供高精度运动学、动力学和碰撞检测）
+## 文档结构
 
-**本文档包含三章**：
-- **第一章**：基于加权最小二乘的WBC（本项目实现）
-- **第二章**：三种WBC方法对比（总览）
-- **第三章**：零空间优化的数学推导（深入理论）
+| 文档 / 章节 | 内容 |
+|---|---|
+| **第一章** WBC 方法分类与对比 | 按“优先级方式 × 有无不等式约束”两个维度，把四种方法放在一张图里对比，并链接到各方法的详细文档 |
+| **第二章** 零空间投影的数学推导 | 伪逆、零空间、次任务投影的严格推导，以及臂角案例 |
+| **[QP_WBC.md](QP_WBC.md)** 运动学 QP-WBC | 加权方法与带约束的 QP 方法：**加权最小二乘（本项目实现）**、**加权 QP（WQP）**、**分层 QP（HQP）** |
+| **[QP_KKT_GUIDE.md](QP_KKT_GUIDE.md)** 有约束 QP 入门 | 从无约束 QP 出发推导 KKT 条件，以及 Active Set 迭代求解 |
+| **[README.md](README.md)** | 运行示例、验证结果与项目进度 |
+
+**阅读路线**：第一章（有哪些做法、各自的位置）→ 按需深入：严格分层的理论看第二章，加权最小二乘与带约束的 QP 方法看 [QP_WBC.md](QP_WBC.md)。
+
+**符号约定**（全部文档统一）：决策变量 $\mathbf{v} = \dot{\mathbf{q}}$ 为受控自由度的速度；$\mathbf{J}$ 为任务雅可比；$\dot{\mathbf{x}}_{\text{des}}$ 为期望任务速度；控制周期 $dt = 2$ ms，每周期 $\mathbf{q} \leftarrow \mathbf{q} + \mathbf{v}\,dt$。
 
 ---
 
@@ -17,809 +24,401 @@
 
 ---
 
-# 第一章 基于加权最小二乘的WBC（本项目实现）
+# 第一章 WBC方法分类与对比
 
-> **方法类型**：加权阻尼最小二乘（Weighted Damped Least Squares）  
-> **特点**：闭式解、计算快速（~0.3ms）、主次任务混合优化  
-> **适用场景**：实时控制、冗余度机器人
+> 本章把常见的四种 WBC 方法放在同一个框架下比较，帮助理解它们的关系并选择方案。
 
 ---
 
-## 1.1 核心思想
+## 1.1 冗余度与零空间
 
-把机器人看作一个**整体**，联合规划：
-- **底盘**（3 自由度：前后 x、左右 y、转向 yaw）
-- **躯干**（4 个关节）
-- **手臂**（左右各 7 个关节，单臂任务时仅规划一侧）
+**冗余度**：自由度数 > 任务维度。
 
-每个控制周期（如 2 ms），计算出所有关节和底盘应该以什么**速度**运动，才能让末端最快接近目标。
+例如 14 个自由度（3 底盘 + 4 躯干 + 7 手臂）控制 6 维末端任务：
 
----
-
-## 1.2 数学建模
-
-### 1.2.1 状态向量
-
-定义全身速度向量（单臂任务：14 维；双臂任务：21 维）：
-
-$$
-\mathbf{v} = \begin{bmatrix} \dot{\mathbf{q}}_{\text{base}} \\ \dot{\mathbf{q}}_{\text{torso}} \\ \dot{\mathbf{q}}_{\text{arms}} \end{bmatrix}
-$$
-
-其中：
-- $\dot{\mathbf{q}}_{\text{base}} = [\dot{x}, \dot{y}, \dot{\theta}_{\text{yaw}}]^T$ —— 底盘在世界坐标系中的速度（3 维）
-- $\dot{\mathbf{q}}_{\text{torso}}$ —— 躯干的 4 个关节角速度
-- $\dot{\mathbf{q}}_{\text{arms}}$ —— 手臂关节角速度（单臂 7 维，双臂 14 维）
-
-### 1.2.2 末端速度与全身速度的关系
-
-末端的 6 维速度（3 维线速度 + 3 维角速度）可以表示为：
-
-$$
-\dot{\mathbf{x}}_{\text{ee}} = \mathbf{J} \cdot \mathbf{v}
-$$
-
-这里 $\mathbf{J}$ 是**任务雅可比矩阵**（6×13），它描述了"每个自由度变化 1 单位，末端会移动多少"。
-
-**$\mathbf{J}$ 的构造**：
-
-在 MuJoCo 中，底盘被建模为三个真实的关节（`base_x`, `base_y`, `base_yaw`），因此 $\mathbf{J}$ 由 `mj_jacSite()` 一步计算完成，无需手工拼接底盘项和手臂项。
-
-**原理等价性**：虽然实现方式变了，但数学原理与手工推导完全一致：
-
-#### （手工推导参考）底盘部分 $\mathbf{J}_{\text{base}}$（6×3）
-
-底盘运动如何影响末端？用刚体速度公式：
-
-$$
-\begin{aligned}
-\text{线速度:} \quad \mathbf{v}_{\text{ee}} &= \mathbf{v}_{\text{base}} + \boldsymbol{\omega}_{\text{base}} \times \mathbf{r} \\
-\text{角速度:} \quad \boldsymbol{\omega}_{\text{ee}} &= \boldsymbol{\omega}_{\text{base}}
-\end{aligned}
-$$
-
-其中 $\mathbf{r}$ 是从底盘中心到末端的位置向量。
-
-因为底盘只能平面运动（yaw 转向），所以：
-- $\mathbf{v}_{\text{base}} = [v_x, v_y, 0]^T$
-- $\boldsymbol{\omega}_{\text{base}} = [0, 0, \omega_{\text{yaw}}]^T$
-
-展开叉乘 $\boldsymbol{\omega}_{\text{base}} \times \mathbf{r}$：
-
-$$
-[0, 0, \omega_{\text{yaw}}] \times [r_x, r_y, r_z] = [-r_y \cdot \omega_{\text{yaw}}, r_x \cdot \omega_{\text{yaw}}, 0]
-$$
-
-所以底盘雅可比为：
-
-$$
-\mathbf{J}_{\text{base}} = \begin{bmatrix}
-1 & 0 & -r_y \\
-0 & 1 & r_x \\
-0 & 0 & 0 \\
-0 & 0 & 0 \\
-0 & 0 & 0 \\
-0 & 0 & 1
-\end{bmatrix}
-\begin{matrix}
-\leftarrow \text{x 方向线速度} \\
-\leftarrow \text{y 方向线速度} \\
-\leftarrow \text{z 方向线速度（底盘不能飞）} \\
-\leftarrow \text{roll 角速度（底盘不能倾斜）} \\
-\leftarrow \text{pitch 角速度} \\
-\leftarrow \text{yaw 角速度}
-\end{matrix}
-$$
-
-#### （实际实现）MuJoCo 自动计算
-
-```python
-# wbc_controller.py:178-185
-jacp = np.zeros((3, model.nv))  # 线速度雅可比
-jacr = np.zeros((3, model.nv))  # 角速度雅可比
-mujoco.mj_jacSite(model, data, jacp, jacr, site_id)
-J = np.vstack([jacp[:, controlled_dofs], jacr[:, controlled_dofs]])
-```
-
-MuJoCo 返回的 $\mathbf{J}$ 已包含底盘三个关节的列，其数值与上述手工推导等价，但由编译后的模型自动计算，避免了手工推导底盘项时可能出现的坐标系错误。
-
----
-
-## 1.3 控制问题：速度层 QP
-
-### 1.3.1 主任务：跟踪末端目标
-
-当前末端位姿与目标位姿有误差 $\mathbf{e}_{\text{pose}}$（6 维：3 位置 + 3 姿态）。
-
-用**比例控制**，期望末端速度为：
-
-$$
-\dot{\mathbf{x}}_{\text{desired}} = K \cdot \mathbf{e}_{\text{pose}}
-$$
-
-其中 $K$ 是增益（如 $K=2$，表示"每秒消除误差的 200%"，实际是指数收敛）。
-
-结合雅可比，我们希望：
-
-$$
-\mathbf{J} \cdot \mathbf{v} \approx K \cdot \mathbf{e}_{\text{pose}}
-$$
-
-但这是一个**欠定系统**（方程数 < 变量数），有无穷多解。我们需要加约束。
-
-### 1.3.2 次任务：姿态正则 + 避免奇异
-
-不希望机器人为了完成任务而扭成奇怪的姿态，所以加一个**正则项**：
-
-$$
-\mathbf{v} \text{ 应该接近 } \mathbf{v}_{\text{posture}} \text{（期望姿态速度）}
-$$
-
-其中 $\mathbf{v}_{\text{posture}}$ 定义为"拉向关节中位"的速度：
-
-$$
-v_{\text{posture},i} = k_{\text{posture}} \cdot (q_{\text{mid},i} - q_{\text{current},i})
-$$
-
-同时加一个**阻尼项** $\lambda \|\mathbf{v}\|^2$，防止雅可比奇异时速度爆炸。
-
-### 1.3.3 完整的 QP 目标函数
-
-最小化：
-
-$$
-\mathcal{L}(\mathbf{v}) = \|\mathbf{J}\mathbf{v} - K\mathbf{e}_{\text{pose}}\|^2_{\mathbf{W}} + \lambda\|\mathbf{v}\|^2 + \|\mathbf{v} - \mathbf{v}_{\text{posture}}\|^2_{\mathbf{W}_p}
-$$
-
-其中：
-- $\mathbf{W}$ —— 任务权重矩阵（位置权重高于姿态）
-- $\lambda$ —— Tikhonov 阻尼系数（典型值 0.01）
-- $\mathbf{W}_p$ —— 姿态正则权重（底盘权重极小，关节权重适中）
-
----
-
-## 1.4 闭式解（无需 QP 求解器）
-
-展开目标函数，求导并令其为零：
-
-$$
-\frac{\partial \mathcal{L}}{\partial \mathbf{v}} = 2(\mathbf{J}^T \mathbf{W} \mathbf{J} + \lambda \mathbf{I} + \mathbf{W}_p)\mathbf{v} - 2\mathbf{J}^T \mathbf{W} K\mathbf{e}_{\text{pose}} - 2\mathbf{W}_p\mathbf{v}_{\text{posture}} = 0
-$$
-
-整理得：
-
-$$
-\mathbf{A}\mathbf{v} = \mathbf{b}
-$$
-
-其中：
-- $\mathbf{A} = \mathbf{J}^T \mathbf{W} \mathbf{J} + \lambda \mathbf{I} + \mathbf{W}_p$
-- $\mathbf{b} = \mathbf{J}^T \mathbf{W} K\mathbf{e}_{\text{pose}} + \mathbf{W}_p\mathbf{v}_{\text{posture}}$
-
-直接求解：
-
-$$
-\mathbf{v} = \mathbf{A}^{-1} \mathbf{b}
-$$
-
-这是一个**线性方程组**，用 `np.linalg.solve()` 即可，不需要外部 QP 求解器。
-
----
-
-
-
-## 1.5 关键设计技巧
-
-### 1.5.1 让底盘"自由地"参与规划
-
-设置 $\mathbf{W}_p$ 时：
-- 底盘自由度的权重设为极小值（如 $10^{-6}$）
-- 关节自由度的权重设为正常值（如 $0.1$）
-
-**效果**：当目标远时，底盘会"主动"移动；当目标近时，底盘保持静止，手臂完成任务。
-
-### 1.5.2 位置优先，姿态次要
-
-设置 $\mathbf{W}$ 时：
-- 位置误差权重 = 1.0
-- 姿态误差权重 = 0.1
-
-**效果**：先把末端移到对的地方，再慢慢调整朝向。
-
----
-
-
-
-## 1.6 实现与验证
-
-### 文件说明
-
-| 文件 | 作用 |
-|------|------|
-| `convert_urdf.py` | URDF→MJCF转换器 + 自动增益调谐 |
-| `wbc_controller.py` | 核心：`WholeBodyController` 类，实现上述 QP 求解（MuJoCo API） |
-| `robot_model.py` | 模型加载抽象、标记管理、HOME_POSE 定义 |
-| `simulate.py` | MuJoCo 仿真 + 自动化测试（运动学/动力学双模式） |
-| `test_dual_arm_ground.py` | 双臂够地面测试（扩展为多末端任务） |
-
-### 运行示例
-
-```bash
-# 安装依赖
-pip install mujoco==3.2.7 numpy==1.26.4
-
-# 首次运行：转换URDF为MJCF（自动调谐伺服增益）
-python convert_urdf.py
-
-# 基础测试：近处目标（手臂够得到）
-python simulate.py --headless
-
-# 远处目标：需要底盘移动
-python simulate.py --headless --target 1.2 -1.5 1.0
-
-# 对照组：禁用底盘（会失败）
-python simulate.py --headless --no-base --target 1.2 -1.5 1.0
-
-# 指定末端姿态
-python simulate.py --headless --target-rpy 0 0.5 -0.3
-
-# 动态模式：物理伺服驱动（有重力和执行器延迟）
-python simulate.py --headless --dynamic
-
-# 双臂够地面
-python test_dual_arm_ground.py --headless --ground-z 0.25
-
-# 交互式查看器（需要图形界面）
-python simulate.py
-```
-
-### 验证结果
-
-| 场景 | 位置误差 | 姿态误差 | 收敛时间 | 结果 |
-|------|---------|---------|---------|------|
-| 近处目标（运动学） | 2.96 mm | 0.00° | 1.10 s | ✅ PASS |
-| 近处目标（动态） | 9.1 mm | 0.07° | 1.34 s | ✅ PASS |
-| 远处目标（启用底盘） | <10 mm | <3° | <2 s | ✅ PASS |
-| 远处目标（禁用底盘） | >500 mm | — | — | ❌ FAIL |
-| 双臂够地面 0.25m | 5.96 mm | 0.01° | 0.99 s | ✅ PASS |
-| 雅可比校验 | 4.6e-07 | — | — | ✅ OK |
-
-**核心验证点**：同一目标，仅手臂无法到达（误差 >50 cm），加入底盘后达到毫米级精度。
-
-**运动学 vs 动态**：
-- **运动学模式**：直接积分速度，无重力/摩擦，验证控制器数学
-- **动态模式**：真实物理伺服，有重力补偿、执行器延迟和碰撞检测
-
----
-
-
-
-## 1.7 质量保证
-
-### 自动化检查点
-
-1. **雅可比有限差分校验**：启动时自动执行
-   - 对每个自由度施加微小扰动 $\Delta q$
-   - 用正向运动学测量末端实际位姿变化 $\Delta \mathbf{x}$
-   - 检查 $\|\Delta \mathbf{x} - \mathbf{J} \cdot \Delta q\| < 10^{-3}$
-   - 当前误差约 $5 \times 10^{-4}$ ✅
-
-2. **收敛判定**：
-   - 位置误差 < 1 cm **且** 姿态误差 < 3°
-   - 连续保持 50 步（0.5 秒）
-   - 中途回升则重置计数
-
-3. **最终裁决**：PASS 需同时满足位置和姿态容差
-
----
-
-
-
-## 1.8 已知限制
-
-1. **底盘模型简化**：
-   - 当前：假设底盘可横向平移（理想平面关节）
-   - 现实：差速轮底盘不能侧向移动
-   - 真机部署时需要替换为差速驱动模型或非完整约束
-
-2. **关节限位**：当前用软斥力，未来可改为硬约束（需要二次锥规划求解器）
-
-3. **碰撞约束**：自碰撞检测在物理引擎中已启用，但尚未作为QP不等式约束集成
-
----
-
-
-
-## 1.9 扩展方向
-
-- ✅ 双臂协同（已实现：`test_dual_arm_ground.py`）
-- ✅ 动力学模式验证（运动学/动态双模式通过）
-- ⏳ 差速轮底盘模型（非完整约束）
-- ⏳ 实时碰撞约束（不等式约束QP）
-- ⏳ MPC轨迹优化（多步预测）
-- ⏳ 力控模式（阻抗控制）
-
----
-
-
-
-
----
-
-# 第二章 三种WBC方法对比（总览）
-
-> 本章对比三种WBC实现方法，帮助读者选择适合的方案。
-
----
-
-## 2.1 冗余度与零空间
-
-**冗余度**：关节自由度 > 任务维度
-
-例如：14个关节（3底盘+4躯干+7手臂）控制6维末端任务（3位置+3姿态）
 $$
 \text{冗余度} = 14 - 6 = 8
 $$
 
-**零空间**：完成主任务后剩余的自由度空间
+**零空间**：不影响任务的运动构成的空间：
 
-数学定义：
 $$
 \mathcal{N}(\mathbf{J}) = \{ \mathbf{v} \in \mathbb{R}^{n} \mid \mathbf{J}\mathbf{v} = \mathbf{0} \}
 $$
 
-**物理含义**：$\mathbf{v} \in \mathcal{N}(\mathbf{J})$ 表示关节以速度 $\mathbf{v}$ 运动时，末端速度为零。
+$\mathbf{v} \in \mathcal{N}(\mathbf{J})$ 表示以速度 $\mathbf{v}$ 运动时，末端速度为零。冗余度越高，零空间越大，可用来完成次任务（避限位、保持姿态、避障等）的自由度越多。
 
 ---
 
-## 2.2 方法1：加权最小二乘
+## 1.2 方法分类：两个维度
 
-**本项目采用的方法**（详见第一章）
+各种 WBC 方法都在解同一个问题：**在冗余自由度中，按某种准则选出一个 $\mathbf{v}$**。它们的区别可以归结为两个**相互独立**的维度：
 
-**目标函数**：
-$$
-\min_{\mathbf{v}} \|\mathbf{J}\mathbf{v} - \dot{\mathbf{x}}\|^2_{\mathbf{W}} + \lambda\|\mathbf{v}\|^2 + \|\mathbf{v} - \mathbf{v}_{\text{post}}\|^2_{\mathbf{W}_p}
-$$
+1. **多任务的优先级怎么体现**
+   - **加权**（软优先级）：所有任务按权重加进一个目标函数，冲突时按权重折中；
+   - **严格分层**：高优先级任务先满足，低优先级只能在其零空间内优化，绝不影响高优先级。
+2. **能否处理不等式约束**（关节限位、速度限位、避障……）
+   - **不能**：问题只有等式 / 二次代价，有**闭式解**；
+   - **能**：需要 **QP 求解器**。
 
-**解**：
-$$
-\mathbf{v} = (\mathbf{J}^T\mathbf{W}\mathbf{J} + \lambda\mathbf{I} + \mathbf{W}_p)^{-1} (\mathbf{J}^T\mathbf{W}\dot{\mathbf{x}} + \mathbf{W}_p\mathbf{v}_{\text{post}})
-$$
+两个维度组合，得到四种方法：
 
-**特点**：
-- 闭式解，O(n³) 复杂度
-- 主次任务混合（次任务会轻微影响主任务）
-- 数值稳定（$\lambda\mathbf{I}$ 保证可逆）
+| | 无不等式约束（闭式解） | 有不等式约束（QP 求解器） |
+|---|---|---|
+| **加权** | **方法 1：加权最小二乘**（1.3 节，本项目实现，[QP_WBC.md §1](QP_WBC.md#1-加权最小二乘本项目实现)） | **方法 3：加权 QP（WQP）**（1.5 节，[QP_WBC.md §7](QP_WBC.md#7-加权-qpwqp)） |
+| **严格分层** | **方法 2：零空间投影**（1.4 节，[第二章](#第二章-零空间投影的数学推导)） | **方法 4：分层 QP（HQP）**（1.6 节，[QP_WBC.md §8](QP_WBC.md#8-分层-qphqp)） |
 
-**适用**：实时控制（~0.3ms）
+**同一行的两种方法是同一个优化问题**，只差不等式约束：
+- WQP 去掉不等式约束 = 加权最小二乘；
+- HQP 去掉不等式约束 = 零空间投影。
 
----
+**同一列的两种方法**处理不等式约束的能力相同，区别只在优先级方式。
 
-## 2.3 方法2：零空间投影
-
-**严格分层方法**
-
-**步骤**：
-1. 主任务：$\mathbf{v}_1 = \mathbf{J}^\dagger_\lambda \dot{\mathbf{x}}$
-2. 零空间投影矩阵：$\mathbf{N} = \mathbf{I} - \mathbf{J}^\dagger_\lambda \mathbf{J}$
-3. 次任务投影：$\mathbf{v}_2 = \mathbf{N} \mathbf{v}_{\text{post}}$
-4. 总速度：$\mathbf{v} = \mathbf{v}_1 + \mathbf{v}_2$
-
-其中阻尼伪逆：
-$$
-\mathbf{J}^\dagger_\lambda = \mathbf{J}^T (\mathbf{J}\mathbf{J}^T + \lambda\mathbf{I})^{-1}
-$$
-
-**特点**：
-- 次任务完全不影响主任务（$\mathbf{J}\mathbf{v}_2 = \mathbf{0}$）
-- 需要计算伪逆，稍慢
-- 优先级严格
-
-**适用**：高精度要求、离线规划
+> 原先常见的“加权最小二乘 / 零空间投影 / 分层 QP”三分法，把两个维度混在了一起：前两者的区别是优先级方式，而分层 QP 与零空间投影的区别是有无不等式约束。这样分会漏掉右上角的加权 QP，也就是“在现有加权最小二乘上加入约束”这条最直接的升级路线。
 
 ---
 
-## 2.4 方法3：分层QP
+## 1.3 方法 1：加权最小二乘
 
-**多层次优化**
+**本项目采用的方法**，详见 [QP_WBC.md §1](QP_WBC.md#1-加权最小二乘本项目实现)。
 
-**问题**：
 $$
-\begin{aligned}
-\text{Level 1:} & \quad \min_{\mathbf{v}} \|\mathbf{J}\mathbf{v} - \dot{\mathbf{x}}\|^2 \\
-\text{Level 2:} & \quad \min_{\mathbf{v}} \|\mathbf{v} - \mathbf{v}_{\text{post}}\|^2 \\
-& \quad \text{s.t.} \quad \|\mathbf{J}\mathbf{v} - \dot{\mathbf{x}}\| \leq \epsilon
-\end{aligned}
+\min_{\mathbf{v}} \tfrac12\|\mathbf{J}\mathbf{v} - \dot{\mathbf{x}}_{\text{des}}\|^2_{\mathbf{W}} + \tfrac{\lambda}{2}\|\mathbf{v}\|^2 + \tfrac12\|\mathbf{v} - \mathbf{v}_{\text{post}}\|^2_{\mathbf{W}_p}
 $$
 
-**特点**：
-- 可叠加多层任务（主任务 → 避障 → 姿态 → ...）
-- 需要QP求解器（OSQP、qpOASES）
-- 最灵活但最慢
+$$
+\mathbf{v}^* = (\mathbf{J}^T\mathbf{W}\mathbf{J} + \lambda\mathbf{I} + \mathbf{W}_p)^{-1} (\mathbf{J}^T\mathbf{W}\dot{\mathbf{x}}_{\text{des}} + \mathbf{W}_p\mathbf{v}_{\text{post}})
+$$
 
-**适用**：复杂约束、多层次任务
-
----
-
-## 2.5 三种方法对比
-
-| 维度 | 方法1：加权最小二乘 | 方法2：零空间投影 | 方法3：分层QP |
-|------|------------------|-----------------|-------------|
-| **实现** | 闭式解 | 伪逆+投影 | QP求解器 |
-| **计算时间** | ~0.3ms | ~1-2ms | ~5-10ms |
-| **主任务精度** | 99% | 100% | 100% |
-| **次任务隔离** | 否（轻微影响） | 是（严格） | 是（严格） |
-| **奇异处理** | 自动（$\lambda\mathbf{I}$） | 需阻尼伪逆 | QP内处理 |
-| **多层任务** | 否 | 否（仅2层） | 是（任意层） |
-| **代码复杂度** | 低 | 中 | 高 |
-| **适用场景** | 实时控制 | 高精度 | 复杂约束 |
-
-**本项目选择方法1的原因**：
-- 2ms控制周期要求
-- 精度差异<2mm（机械误差已超过）
-- 代码简洁、鲁棒性好
+- 闭式解，解一个 $n \times n$ 线性方程组
+- 主次任务按权重折中：次任务会轻微影响主任务
+- $\lambda\mathbf{I}$ 保证可解，并抑制奇异附近的速度爆炸
+- 不等式约束只能事后裁剪或用斥力近似
 
 ---
 
-## 2.6 应用场景
+## 1.4 方法 2：零空间投影
 
-| 应用 | 推荐方法 | 原因 |
-|------|---------|------|
-| 实时跟踪 | 方法1 | 速度优先 |
-| 手术机器人 | 方法2/3 | 精度优先 |
-| 双臂协调 | 方法3 | 多层任务 |
-| 避障操作 | 方法3 | 不等式约束 |
-| 移动操作 | 方法1 | 实时性 |
+**严格分层**的闭式方法（详见[第二章](#第二章-零空间投影的数学推导)）：
+
+$$
+\mathbf{v}^* = \mathbf{J}^\dagger \dot{\mathbf{x}}_{\text{des}} + \mathbf{N}\,\mathbf{v}_{\text{post}}, \qquad
+\mathbf{N} = \mathbf{I} - \mathbf{J}^\dagger\mathbf{J}
+$$
+
+- 次任务被投影到主任务的零空间，满足 $\mathbf{J}\mathbf{N}\mathbf{v}_{\text{post}} = \mathbf{0}$，不影响主任务
+- 可以递推到多层（第 $k$ 层投影到前 $k-1$ 层的零空间，见 [2.8 节](#28-推广到多层与分层-qp-的关系)）
+- 需要计算伪逆；接近奇异时要用阻尼伪逆，此时严格隔离会被轻微破坏（[2.6 节](#26-阻尼伪逆数值稳定性与精度的权衡)）
+- 不等式约束同样只能事后处理
 
 ---
 
-## 2.7 演示代码
+## 1.5 方法 3：加权 QP（WQP）
 
-运行三种方法的数值对比：
+方法 1 加上不等式约束：
+
+$$
+\min_{\mathbf{v}} \sum_i \tfrac{w_i}{2} \|\mathbf{J}_i\mathbf{v} - \dot{\mathbf{x}}_{d,i}\|^2_{\mathbf{W}_i} + \tfrac{\lambda}{2}\|\mathbf{v}\|^2 + \tfrac12\mathbf{v}^T\mathbf{R}\,\mathbf{v}
+\quad \text{s.t.} \quad
+\mathbf{lb} \leq \mathbf{v} \leq \mathbf{ub},\;\; \mathbf{lb}_A \leq \mathbf{A}\mathbf{v} \leq \mathbf{ub}_A
+$$
+
+- 目标函数与方法 1 相同，关节限位、速度限位变成 Box 约束，躯干范围、避碰等变成线性约束
+- 需要 QP 求解器（qpOASES、OSQP、ProxQP 等），中小规模下实时可行
+- 是本项目**改动最小的升级路线**：目标函数不变，只增加约束
+
+详见 [QP_WBC.md §7](QP_WBC.md#7-加权-qpwqp)。
+
+---
+
+## 1.6 方法 4：分层 QP（HQP）
+
+方法 2 加上不等式约束。按优先级逐层求解，每层把上层已达到的残差**锁定**为约束：
+
+$$
+\text{第 } k \text{ 层：}\quad
+\min_{\mathbf{v}} \|\mathbf{J}_k\mathbf{v} - \dot{\mathbf{x}}_{d,k}\|^2
+\quad \text{s.t.} \quad
+\mathbf{J}_j\mathbf{v} - \dot{\mathbf{x}}_{d,j} = \mathbf{r}_j^*\;(j < k),\;\; \text{不等式约束}
+$$
+
+$\mathbf{r}_j^*$ 是第 $j$ 层求出的最优残差。
+
+- 可以叠加任意多层（主任务 → 避障 → 姿态 → ……），不等式约束也可以作为某一层
+- 每层解一个 QP，计算量约为 WQP 的层数倍
+
+详见 [QP_WBC.md §8](QP_WBC.md#8-分层-qphqp)。
+
+---
+
+## 1.7 四种方法对比
+
+| 维度 | 1 加权最小二乘 | 2 零空间投影 | 3 加权 QP | 4 分层 QP |
+|---|---|---|---|---|
+| **优先级** | 软（按权重折中） | 严格 | 软 | 严格 |
+| **不等式约束** | 不能（事后裁剪） | 不能（事后裁剪） | 能 | 能 |
+| **求解方式** | 解线性方程组 | 伪逆 + 投影 | 1 个 QP | 每层 1 个 QP |
+| **计算量** | 最低 | 低 | 中 | 最高（约为 3 的层数倍） |
+| **主任务精度** | 冲突时有小残差，取决于权重比 | 无冲突时精确（阻尼时近似） | 同 1 | 同 2，且满足约束 |
+| **多层任务** | 靠权重区分，层次多时难调 | 可递推多层 | 靠权重区分 | 任意层 |
+| **奇异处理** | $\lambda\mathbf{I}$ 自动处理 | 需阻尼伪逆 | $\lambda\mathbf{I}$ | 每层正则化 |
+| **任务切换** | 权重连续变化，平滑 | 换层可能跳变 | 平滑 | 换层可能跳变 |
+| **代码复杂度** | 低 | 中 | 中 | 高 |
+
+> 具体的计算时间取决于自由度数、约束数和求解器。本项目的规模（14~21 维）下，四种方法都能满足 2 ms 控制周期的数量级要求，需要以实测为准。
+
+**两个关键关系**（详细推导见 [QP_WBC.md §9](QP_WBC.md#9-wqp-与-hqp-的区别)）：
+- 加权方法中，权重比 → ∞ 时趋于严格分层，但 $\mathbf{H}$ 会越来越病态，所以**不能靠把权重拉得极大来模拟严格优先级**；
+- 闭式方法是对应 QP 方法去掉不等式约束的特例，所以从闭式方法升级到 QP 方法时，任务定义和权重设计都可以沿用。
+
+---
+
+## 1.8 选型
+
+| 需求 | 推荐 | 原因 |
+|---|---|---|
+| 快速验证、无约束的到达任务 | 1 加权最小二乘 | 最简单、最快 |
+| 需要直观演示“次任务不影响主任务” | 2 零空间投影 | 隔离严格，便于可视化（如 [2.7 节](#27-案例用标准臂角-psi-驱动零空间速度)臂角案例） |
+| 需要硬限位、避碰，且任务很少冲突 | 3 加权 QP | 在方法 1 基础上加约束即可 |
+| 需要“某任务必须保证” + 约束（如末端稳定优先于躯干轨迹） | 4 分层 QP | 严格优先级 + 约束 |
+| 层数不多、既要优先级又要实时 | 混合（2~3 层 HQP，层内加权） | 实际工程中最常用 |
+
+**本项目的现状与路线**：
+- 方法 1 是原有实现（`wbc_function/wbc_controller.py` 的默认模式），控制周期短、目标为静止点、任务冲突少，加权的精度已足够；
+- 零空间相关演示使用方法 2（[第二章](#第二章-零空间投影的数学推导)，`demo_*.py`）；
+- 方法 3 已在 `wbc_function/wqp_solver.py` 中实现（`WQPSolver`，基于 qpOASES），把限位和速度上限变成了硬约束，解决了 [QP_WBC.md §1.5.4](QP_WBC.md#154-姿态项与限位处理的实际效果) 的问题；方法 1 也已封装为同一接口下的 `WLSSolver`（见 [QP_WBC.md §11](QP_WBC.md#11-代码结构wbc_function)）；
+- 需要严格优先级时，再在同一接口上扩展方法 4。
+
+---
+
+## 1.9 演示代码
 
 ```bash
 python3 nullspace_example.py
 ```
 
-输出包括：
-- 主任务误差对比
-- 次任务完成度对比
-- 零空间验证（方法2）
-- 计算时间对比
+用一个数值示例对比加权与零空间方法：主任务误差、次任务完成度、零空间验证和计算时间。其中“分层 QP”部分只是用零空间投影的解析解做示意，没有接入真正的 QP 求解器。
 
 ---
 
----
+# 第二章 零空间投影的数学推导
 
-
----
-
----
-
-# 第三章 零空间优化的数学推导
-
-> 本章从实际问题出发，严格推导零空间投影的完整流程。
+> 本章从实际问题出发，推导零空间投影的完整流程。它是 1.2 节中“严格分层 × 无不等式约束”的方法；加入不等式约束后即为分层 QP（[QP_WBC.md §8](QP_WBC.md#8-分层-qphqp)）。
 
 ---
 
-## 3.1 问题引入
+## 2.1 问题引入
 
-**实际场景**：机械臂够桌上的杯子
+**场景**：机械臂够桌上的杯子。
 
-- **主任务**：手指到达杯子位置（6维：3位置+3姿态）
-- **观察**：手末端固定后，肘部仍可上抬或下垂，身体可前倾或后仰
-- **问题**：如何利用这些"多余"的自由度实现次任务？
+- **主任务**：手到达杯子（6 维：3 位置 + 3 姿态）
+- **观察**：手固定后，肘部仍可上抬或下垂，身体可前倾或后仰
+- **问题**：如何利用这些“多余”的自由度完成次任务？
 
-**数学形式化**：
-
-给定雅可比矩阵 $\mathbf{J} \in \mathbb{R}^{m \times n}$（$m=6$ 任务维度，$n=14$ 关节数），主任务要求：
+**数学形式化**：雅可比 $\mathbf{J} \in \mathbb{R}^{m \times n}$（$m = 6$，$n = 14$），主任务要求
 
 $$
 \mathbf{J}\mathbf{v} = \dot{\mathbf{x}}_{\text{des}}
 $$
 
-这是欠定系统（$m < n$），有无穷多解。次任务希望从这些解中选择最接近 $\mathbf{v}_{\text{post}}$ 的那个。
+这是欠定系统（$m < n$），有无穷多解。次任务希望从这些解中选出最接近 $\mathbf{v}_{\text{post}}$ 的那个。
 
 ---
 
-## 3.2 零空间：不影响主任务的运动
+## 2.2 零空间：不影响主任务的运动
 
-### 3.2.1 定义
-
-**零空间**（Null Space）：
+### 2.2.1 定义
 
 $$
 \mathcal{N}(\mathbf{J}) = \{ \mathbf{v} \in \mathbb{R}^{n} \mid \mathbf{J}\mathbf{v} = \mathbf{0} \}
 $$
 
-**物理含义**：$\mathbf{v} \in \mathcal{N}(\mathbf{J})$ 表示关节以速度 $\mathbf{v}$ 运动时，末端速度为零（"手指不动"）。
+**物理含义**：$\mathbf{v} \in \mathcal{N}(\mathbf{J})$ 表示关节以速度 $\mathbf{v}$ 运动时，末端不动。
 
 **性质**：
-- 维度：$\dim(\mathcal{N}(\mathbf{J})) = n - \text{rank}(\mathbf{J})$（满秩时为 $n - m = 14 - 6 = 8$）
-- 叠加性：$\forall \mathbf{v}_1 \in \mathcal{N}(\mathbf{J}), \forall \mathbf{v}_2: \mathbf{J}(\mathbf{v}_2 + \mathbf{v}_1) = \mathbf{J}\mathbf{v}_2$
+- 维度：$\dim\mathcal{N}(\mathbf{J}) = n - \text{rank}(\mathbf{J})$（行满秩时为 $n - m = 8$）
+- 叠加性：对任意 $\mathbf{v}_n \in \mathcal{N}(\mathbf{J})$ 和任意 $\mathbf{v}$，有 $\mathbf{J}(\mathbf{v} + \mathbf{v}_n) = \mathbf{J}\mathbf{v}$
 
-**回到场景**：肘部摆动对应的关节速度 $\mathbf{v}_{\text{elbow}} \in \mathcal{N}(\mathbf{J})$，因此叠加到任何满足主任务的速度上都不改变手指运动。
+**回到场景**：肘部摆动对应的关节速度属于 $\mathcal{N}(\mathbf{J})$，叠加到任何满足主任务的速度上都不改变手的运动。
 
-### 3.2.2 零空间基的求解（SVD分解）
-
-对 $\mathbf{J}$ 进行奇异值分解：
+### 2.2.2 用 SVD 求零空间的基
 
 $$
-\mathbf{J} = \mathbf{U} \mathbf{\Sigma} \mathbf{V}^T
+\mathbf{J} = \mathbf{U}\mathbf{\Sigma}\mathbf{V}^T
 $$
 
-其中：
 - $\mathbf{U} \in \mathbb{R}^{m \times m}$：左奇异向量（正交）
-- $\mathbf{\Sigma} \in \mathbb{R}^{m \times n}$：奇异值矩阵 $\text{diag}(\sigma_1, \ldots, \sigma_m, 0, \ldots, 0)$
-- $\mathbf{V} \in \mathbb{R}^{n \times n}$：右奇异向量（正交）
+- $\mathbf{\Sigma} \in \mathbb{R}^{m \times n}$：$\text{diag}(\sigma_1, \ldots, \sigma_m)$ 右侧补零
+- $\mathbf{V} \in \mathbb{R}^{n \times n}$：右奇异向量（正交），列记为 $\mathbf{v}_1, \ldots, \mathbf{v}_n$
 
-**零空间基**：$\mathbf{V}$ 的最后 $n-m$ 列
+设 $\text{rank}(\mathbf{J}) = r$（行满秩时 $r = m$），**零空间的基是 $\mathbf{V}$ 的后 $n - r$ 列**：
 
 $$
-\mathcal{N}(\mathbf{J}) = \text{span}\{ \mathbf{v}_{m+1}, \ldots, \mathbf{v}_n \}
+\mathcal{N}(\mathbf{J}) = \text{span}\{ \mathbf{v}_{r+1}, \ldots, \mathbf{v}_n \}
 $$
 
-**证明**：对 $i > m$，
-$$
-\mathbf{J}\mathbf{v}_i = \mathbf{U}\mathbf{\Sigma}\mathbf{V}^T\mathbf{v}_i = \mathbf{U}\mathbf{\Sigma}\mathbf{e}_i = \mathbf{0}
-$$
-
-因为 $\mathbf{\Sigma}$ 的第 $i$ 列全为零（$i > m$）。
+**证明**：对 $i > r$，$\mathbf{J}\mathbf{v}_i = \mathbf{U}\mathbf{\Sigma}\mathbf{V}^T\mathbf{v}_i = \mathbf{U}\mathbf{\Sigma}\mathbf{e}_i = \mathbf{0}$，因为 $\mathbf{\Sigma}$ 的第 $i$ 列全为零。
 
 ---
 
-## 3.3 解的分解：主任务解 + 零空间分量
+## 2.3 解的分解：特解 + 零空间分量
 
-### 3.3.1 通解形式
-
-主任务 $\mathbf{J}\mathbf{v} = \dot{\mathbf{x}}_{\text{des}}$ 的通解可写为：
+### 2.3.1 通解形式
 
 $$
 \mathbf{v} = \mathbf{v}_{\text{particular}} + \mathbf{v}_{\text{null}}
 $$
 
-其中：
-- $\mathbf{v}_{\text{particular}}$：特解（满足 $\mathbf{J}\mathbf{v}_{\text{particular}} = \dot{\mathbf{x}}_{\text{des}}$）
+- $\mathbf{v}_{\text{particular}}$：任意一个特解，满足 $\mathbf{J}\mathbf{v}_{\text{particular}} = \dot{\mathbf{x}}_{\text{des}}$
 - $\mathbf{v}_{\text{null}} \in \mathcal{N}(\mathbf{J})$：零空间中的任意向量
 
-### 3.3.2 最小范数特解（Moore-Penrose伪逆）
+### 2.3.2 最小范数特解：Moore-Penrose 伪逆
 
-选择范数最小的特解：
-
-$$
-\mathbf{v}_{\text{particular}} = \mathbf{J}^\dagger \dot{\mathbf{x}}_{\text{des}}
-$$
-
-其中 **Moore-Penrose伪逆**：
+在所有特解中选范数最小的：
 
 $$
-\mathbf{J}^\dagger = \mathbf{V} \mathbf{\Sigma}^\dagger \mathbf{U}^T = \mathbf{J}^T (\mathbf{J}\mathbf{J}^T)^{-1}
+\mathbf{v}_{\text{particular}} = \mathbf{J}^\dagger \dot{\mathbf{x}}_{\text{des}}, \qquad
+\mathbf{J}^\dagger = \mathbf{V}\mathbf{\Sigma}^\dagger\mathbf{U}^T
 $$
 
-$\mathbf{\Sigma}^\dagger$ 是 $\mathbf{\Sigma}$ 的伪逆（非零奇异值取倒数）。
+$\mathbf{\Sigma}^\dagger \in \mathbb{R}^{n \times m}$ 把非零奇异值取倒数、再转置。$\mathbf{J}$ **行满秩**时有等价形式 $\mathbf{J}^\dagger = \mathbf{J}^T(\mathbf{J}\mathbf{J}^T)^{-1}$。
 
-**性质**：
-1. $\mathbf{J}\mathbf{J}^\dagger = \mathbf{I}_m$（右逆）
-2. $\mathbf{J}^\dagger\mathbf{J} \neq \mathbf{I}_n$（不是左逆）
-3. $\mathbf{J}^\dagger\mathbf{J}$ 是到行空间的投影
-
-### 3.3.3 为什么可以通过SVD求解伪逆
-
-**核心思想**：SVD分解将矩阵分解为旋转-缩放-旋转的组合，伪逆就是"反向缩放"。
-
-#### SVD分解
-
-对 $\mathbf{J} \in \mathbb{R}^{m \times n}$（$m < n$）进行奇异值分解：
+**Moore-Penrose 伪逆的四个定义性质**（对任何秩都成立）：
 
 $$
-\mathbf{J} = \mathbf{U} \mathbf{\Sigma} \mathbf{V}^T
+\mathbf{J}\mathbf{J}^\dagger\mathbf{J} = \mathbf{J}, \quad
+\mathbf{J}^\dagger\mathbf{J}\mathbf{J}^\dagger = \mathbf{J}^\dagger, \quad
+(\mathbf{J}\mathbf{J}^\dagger)^T = \mathbf{J}\mathbf{J}^\dagger, \quad
+(\mathbf{J}^\dagger\mathbf{J})^T = \mathbf{J}^\dagger\mathbf{J}
 $$
 
-其中：
-- $\mathbf{U} \in \mathbb{R}^{m \times m}$：左奇异向量（正交矩阵，$\mathbf{U}^T\mathbf{U} = \mathbf{I}_m$）
-- $\mathbf{\Sigma} \in \mathbb{R}^{m \times n}$：奇异值矩阵
-  $$
-  \mathbf{\Sigma} = \begin{bmatrix} \sigma_1 & & & & \mathbf{0} \\ & \ddots & & & \\ & & \sigma_m & & \end{bmatrix}, \quad \sigma_1 \geq \sigma_2 \geq \cdots \geq \sigma_m > 0
-  $$
-- $\mathbf{V} \in \mathbb{R}^{n \times n}$：右奇异向量（正交矩阵，$\mathbf{V}^T\mathbf{V} = \mathbf{I}_n$）
+由此得到：
+1. $\mathbf{J}\mathbf{J}^\dagger = \mathbf{I}_m$（右逆）——**仅在行满秩时成立**；
+2. $\mathbf{J}^\dagger\mathbf{J} \neq \mathbf{I}_n$（$m < n$ 时不是左逆）；
+3. $\mathbf{J}^\dagger\mathbf{J}$ 是到 $\mathbf{J}$ 行空间的**正交投影**（对称且幂等）。
 
-#### 伪逆的构造
+后面的推导只用这四个性质，因此对秩亏的情况也成立。
 
-**定义 $\mathbf{\Sigma}$ 的伪逆** $\mathbf{\Sigma}^\dagger \in \mathbb{R}^{n \times m}$：
+### 2.3.3 用 SVD 理解伪逆
 
-$$
-\mathbf{\Sigma}^\dagger = \begin{bmatrix} 
-\frac{1}{\sigma_1} & & \\
-& \ddots & \\
-& & \frac{1}{\sigma_m} \\
-\mathbf{0} & &
-\end{bmatrix}
-$$
-
-**Moore-Penrose伪逆**：
+**核心思想**：SVD 把矩阵分解为“旋转–缩放–旋转”，伪逆就是反向旋转、对非零方向反向缩放。
 
 $$
-\mathbf{J}^\dagger = \mathbf{V} \mathbf{\Sigma}^\dagger \mathbf{U}^T
+\mathbf{J} = \mathbf{U}\mathbf{\Sigma}\mathbf{V}^T, \qquad
+\mathbf{\Sigma} = \begin{bmatrix} \sigma_1 & & & \\ & \ddots & & \mathbf{0} \\ & & \sigma_m & \end{bmatrix}, \qquad
+\mathbf{\Sigma}^\dagger = \begin{bmatrix} 1/\sigma_1 & & \\ & \ddots & \\ & & 1/\sigma_m \\ & \mathbf{0} & \end{bmatrix}
 $$
 
-#### 验证伪逆性质
-
-**性质1**：$\mathbf{J}\mathbf{J}^\dagger = \mathbf{I}_m$（右逆）
+**验证右逆**（行满秩，$\sigma_m > 0$）：
 
 $$
-\begin{aligned}
-\mathbf{J}\mathbf{J}^\dagger &= (\mathbf{U}\mathbf{\Sigma}\mathbf{V}^T)(\mathbf{V}\mathbf{\Sigma}^\dagger\mathbf{U}^T) \\
-&= \mathbf{U}\mathbf{\Sigma}(\mathbf{V}^T\mathbf{V})\mathbf{\Sigma}^\dagger\mathbf{U}^T \\
-&= \mathbf{U}\mathbf{\Sigma}\mathbf{\Sigma}^\dagger\mathbf{U}^T \\
-&= \mathbf{U}\mathbf{I}_m\mathbf{U}^T \quad (\text{因为 } \mathbf{\Sigma}\mathbf{\Sigma}^\dagger = \mathbf{I}_m) \\
-&= \mathbf{I}_m
-\end{aligned}
+\mathbf{J}\mathbf{J}^\dagger = \mathbf{U}\mathbf{\Sigma}(\mathbf{V}^T\mathbf{V})\mathbf{\Sigma}^\dagger\mathbf{U}^T = \mathbf{U}\mathbf{\Sigma}\mathbf{\Sigma}^\dagger\mathbf{U}^T = \mathbf{U}\mathbf{I}_m\mathbf{U}^T = \mathbf{I}_m
 $$
 
-**性质2**：$\mathbf{J}^\dagger\mathbf{J} \neq \mathbf{I}_n$（不是左逆，但是投影）
+**验证投影**：
 
 $$
-\begin{aligned}
-\mathbf{J}^\dagger\mathbf{J} &= (\mathbf{V}\mathbf{\Sigma}^\dagger\mathbf{U}^T)(\mathbf{U}\mathbf{\Sigma}\mathbf{V}^T) \\
-&= \mathbf{V}\mathbf{\Sigma}^\dagger\mathbf{\Sigma}\mathbf{V}^T
-\end{aligned}
+\mathbf{J}^\dagger\mathbf{J} = \mathbf{V}\mathbf{\Sigma}^\dagger\mathbf{\Sigma}\mathbf{V}^T = \mathbf{V}\begin{bmatrix} \mathbf{I}_m & \mathbf{0} \\ \mathbf{0} & \mathbf{0} \end{bmatrix}\mathbf{V}^T
 $$
 
-其中 $\mathbf{\Sigma}^\dagger\mathbf{\Sigma} \in \mathbb{R}^{n \times n}$ 为：
+这是到 $\mathbf{V}$ 前 $m$ 列张成的空间（即行空间）的正交投影。
+
+**与 $\mathbf{J}^T(\mathbf{J}\mathbf{J}^T)^{-1}$ 等价**（行满秩）：
 
 $$
-\mathbf{\Sigma}^\dagger\mathbf{\Sigma} = \begin{bmatrix} 
-\mathbf{I}_m & \mathbf{0} \\
-\mathbf{0} & \mathbf{0}
-\end{bmatrix}
+\mathbf{J}^T(\mathbf{J}\mathbf{J}^T)^{-1}
+= \mathbf{V}\mathbf{\Sigma}^T\mathbf{U}^T(\mathbf{U}\mathbf{\Sigma}\mathbf{\Sigma}^T\mathbf{U}^T)^{-1}
+= \mathbf{V}\mathbf{\Sigma}^T(\mathbf{\Sigma}\mathbf{\Sigma}^T)^{-1}\mathbf{U}^T
+= \mathbf{V}\mathbf{\Sigma}^\dagger\mathbf{U}^T
 $$
 
-因此：
+最后一步：$\mathbf{\Sigma}\mathbf{\Sigma}^T = \text{diag}(\sigma_i^2)$，所以 $\mathbf{\Sigma}^T(\mathbf{\Sigma}\mathbf{\Sigma}^T)^{-1}$ 的对角元为 $\sigma_i/\sigma_i^2 = 1/\sigma_i$。
 
-$$
-\mathbf{J}^\dagger\mathbf{J} = \mathbf{V} \begin{bmatrix} \mathbf{I}_m & \mathbf{0} \\ \mathbf{0} & \mathbf{0} \end{bmatrix} \mathbf{V}^T
-$$
+### 2.3.4 SVD 求伪逆的优缺点
 
-这是到 $\mathbf{J}$ 的行空间的正交投影矩阵。
+**优点**：
+1. **数值稳定**：不需要显式求 $(\mathbf{J}\mathbf{J}^T)^{-1}$，后者会把条件数平方；
+2. **适用于任何秩**：秩亏时只对非零奇异值取倒数；
+3. **几何直观**：同时给出行空间、零空间的基，以及最小奇异值 $\sigma_{\min}$（离奇异有多远）。
 
-#### 等价形式（对于满秩情况）
-
-当 $\mathbf{J}$ 满秩时（$\text{rank}(\mathbf{J}) = m$），$\mathbf{J}\mathbf{J}^T$ 可逆，此时：
-
-$$
-\begin{aligned}
-\mathbf{J}^\dagger &= \mathbf{V}\mathbf{\Sigma}^\dagger\mathbf{U}^T \\
-&= \mathbf{J}^T(\mathbf{J}\mathbf{J}^T)^{-1}
-\end{aligned}
-$$
-
-**证明**：
-
-$$
-\begin{aligned}
-\mathbf{J}^T(\mathbf{J}\mathbf{J}^T)^{-1} &= (\mathbf{V}\mathbf{\Sigma}^T\mathbf{U}^T)[(\mathbf{U}\mathbf{\Sigma}\mathbf{V}^T)(\mathbf{V}\mathbf{\Sigma}^T\mathbf{U}^T)]^{-1} \\
-&= \mathbf{V}\mathbf{\Sigma}^T\mathbf{U}^T(\mathbf{U}\mathbf{\Sigma}\mathbf{\Sigma}^T\mathbf{U}^T)^{-1} \\
-&= \mathbf{V}\mathbf{\Sigma}^T(\mathbf{\Sigma}\mathbf{\Sigma}^T)^{-1}\mathbf{U}^T \\
-&= \mathbf{V}\mathbf{\Sigma}^\dagger\mathbf{U}^T
-\end{aligned}
-$$
-
-其中最后一步利用了：对于对角矩阵，$\mathbf{\Sigma}^T(\mathbf{\Sigma}\mathbf{\Sigma}^T)^{-1} = \mathbf{\Sigma}^\dagger$。
-
-#### 为什么SVD是最佳方法
-
-1. **数值稳定**：SVD分解数值稳定，即使接近奇异也能正确计算
-2. **自动处理奇异值**：小于阈值的奇异值自动置零，避免数值爆炸
-3. **几何直观**：SVD揭示了矩阵的几何结构（行空间、列空间、零空间）
-4. **通用性**：适用于任何秩的矩阵（满秩、欠秩、奇异）
-
-#### 实际实现（伪代码）
+**缺点：阈值截断会导致跳变**。常见做法是把小于阈值的奇异值直接置零。但当 $\sigma_i$ 从阈值上方连续减小、越过阈值时，对应的 $1/\sigma_i$ 会从一个很大的值**突然变成 0**，解不连续，关节速度跳变。实时控制中更推荐 2.6 节的**阻尼**做法，它让 $1/\sigma_i$ 平滑地变为 $\sigma_i/(\sigma_i^2 + \lambda)$。
 
 ```python
-U, S, Vt = np.linalg.svd(J, full_matrices=False)
-# S: 奇异值向量 [σ₁, σ₂, ..., σₘ]
+U, S, Vt = np.linalg.svd(J, full_matrices=False)   # S = [σ1, ..., σm]
 
-# 计算伪逆奇异值
-threshold = 1e-10
-S_inv = np.zeros_like(S)
-S_inv[S > threshold] = 1.0 / S[S > threshold]
-
-# 构造伪逆
+# 截断伪逆：小奇异值直接置零（会在阈值处跳变）
+S_inv = np.where(S > 1e-10, 1.0 / S, 0.0)
 J_pinv = Vt.T @ np.diag(S_inv) @ U.T
+
+# 阻尼伪逆：平滑过渡（推荐用于实时控制，见 2.6 节）
+S_damped = S / (S**2 + lam)
+J_pinv_damped = Vt.T @ np.diag(S_damped) @ U.T
 ```
-
-**对应你的C++代码**（`gradient_projection.hpp:8-24`）：
-
-```cpp
-Eigen::MatrixXd ComputePseudoInverse(const Eigen::MatrixXd& J) {
-    Eigen::JacobiSVD<Eigen::MatrixXd> svd(J, Eigen::ComputeThinU | Eigen::ComputeThinV);
-    Eigen::VectorXd singularValues = svd.singularValues();
-    
-    Eigen::MatrixXd singularValuesInv = Eigen::MatrixXd::Zero(J.cols(), J.rows());
-    double tolerance = 1e-10;
-    for (int i = 0; i < singularValues.size(); ++i) {
-        if (std::abs(singularValues(i)) > tolerance) {
-            singularValuesInv(i, i) = 1.0 / singularValues(i);
-        }
-    }
-    
-    Eigen::MatrixXd J_pinv = svd.matrixV() * singularValuesInv * svd.matrixU().transpose();
-    return std::move(J_pinv);
-}
-```
-
-这与你的代码逻辑**完全一致** ✅
 
 ---
 
-## 3.4 零空间投影矩阵
+## 2.4 零空间投影矩阵
 
-### 3.4.1 定义
-
-**零空间投影矩阵**：
+### 2.4.1 定义
 
 $$
-\mathbf{N} = \mathbf{I} - \mathbf{J}^\dagger \mathbf{J}
+\mathbf{N} = \mathbf{I} - \mathbf{J}^\dagger\mathbf{J}
 $$
 
-**作用**：将任意向量投影到零空间。
+**作用**：把任意向量投影到 $\mathcal{N}(\mathbf{J})$。
 
-### 3.4.2 性质证明
+### 2.4.2 性质证明
 
-**性质1**：$\mathbf{N}^2 = \mathbf{N}$（幂等性）
+以下证明只用到 2.3.2 节的伪逆定义性质，对任何秩都成立。
 
-$$
-\begin{aligned}
-\mathbf{N}^2 &= (\mathbf{I} - \mathbf{J}^\dagger \mathbf{J})^2 \\
-&= \mathbf{I} - 2\mathbf{J}^\dagger \mathbf{J} + \mathbf{J}^\dagger \mathbf{J} \mathbf{J}^\dagger \mathbf{J} \\
-&= \mathbf{I} - 2\mathbf{J}^\dagger \mathbf{J} + \mathbf{J}^\dagger (\mathbf{J} \mathbf{J}^\dagger) \mathbf{J} \\
-&= \mathbf{I} - 2\mathbf{J}^\dagger \mathbf{J} + \mathbf{J}^\dagger \mathbf{J} \quad (\text{使用 } \mathbf{J}\mathbf{J}^\dagger = \mathbf{I}_m) \\
-&= \mathbf{I} - \mathbf{J}^\dagger \mathbf{J} = \mathbf{N}
-\end{aligned}
-$$
-
-**性质2**：$\mathbf{J}\mathbf{N} = \mathbf{0}$（投影后在零空间内）
+**性质 1：幂等** $\mathbf{N}^2 = \mathbf{N}$
 
 $$
-\mathbf{J}\mathbf{N} = \mathbf{J}(\mathbf{I} - \mathbf{J}^\dagger \mathbf{J}) = \mathbf{J} - \mathbf{J}\mathbf{J}^\dagger \mathbf{J} = \mathbf{J} - \mathbf{J} = \mathbf{0}
+\mathbf{N}^2 = \mathbf{I} - 2\mathbf{J}^\dagger\mathbf{J} + \mathbf{J}^\dagger(\mathbf{J}\mathbf{J}^\dagger\mathbf{J})
+= \mathbf{I} - 2\mathbf{J}^\dagger\mathbf{J} + \mathbf{J}^\dagger\mathbf{J}
+= \mathbf{N}
 $$
 
-**性质3**：$\text{Range}(\mathbf{N}) = \mathcal{N}(\mathbf{J})$
+（用到 $\mathbf{J}\mathbf{J}^\dagger\mathbf{J} = \mathbf{J}$。）
 
-- 前向（$\subseteq$）：$\forall \mathbf{v} = \mathbf{N}\mathbf{x}$，有 $\mathbf{J}\mathbf{v} = \mathbf{J}\mathbf{N}\mathbf{x} = \mathbf{0}$，故 $\mathbf{v} \in \mathcal{N}(\mathbf{J})$。
+**性质 2：对称** $\mathbf{N}^T = \mathbf{N}$，因为 $(\mathbf{J}^\dagger\mathbf{J})^T = \mathbf{J}^\dagger\mathbf{J}$。幂等且对称，说明 $\mathbf{N}$ 是**正交**投影。
 
-- 反向（$\supseteq$）：$\forall \mathbf{v} \in \mathcal{N}(\mathbf{J})$（即 $\mathbf{J}\mathbf{v} = \mathbf{0}$），有
-  $$
-  \mathbf{N}\mathbf{v} = (\mathbf{I} - \mathbf{J}^\dagger \mathbf{J})\mathbf{v} = \mathbf{v} - \mathbf{J}^\dagger(\mathbf{J}\mathbf{v}) = \mathbf{v}
-  $$
-  因此 $\mathbf{v} \in \text{Range}(\mathbf{N})$。
+**性质 3：投影结果在零空间内** $\mathbf{J}\mathbf{N} = \mathbf{0}$
+
+$$
+\mathbf{J}\mathbf{N} = \mathbf{J} - \mathbf{J}\mathbf{J}^\dagger\mathbf{J} = \mathbf{J} - \mathbf{J} = \mathbf{0}
+$$
+
+**性质 4：$\text{Range}(\mathbf{N}) = \mathcal{N}(\mathbf{J})$**
+
+- $\subseteq$：对任意 $\mathbf{v} = \mathbf{N}\mathbf{x}$，$\mathbf{J}\mathbf{v} = \mathbf{J}\mathbf{N}\mathbf{x} = \mathbf{0}$；
+- $\supseteq$：对任意 $\mathbf{v} \in \mathcal{N}(\mathbf{J})$，$\mathbf{N}\mathbf{v} = \mathbf{v} - \mathbf{J}^\dagger(\mathbf{J}\mathbf{v}) = \mathbf{v}$。
 
 ---
 
-## 3.5 次任务投影：完整流程
+## 2.5 次任务投影：完整流程
 
-### 3.5.1 问题设定
+### 2.5.1 问题设定
 
-给定：
 - 主任务：$\mathbf{J}\mathbf{v} = \dot{\mathbf{x}}_{\text{des}}$（精确满足）
-- 次任务：希望关节速度 $\mathbf{v}$ 接近某个期望速度 $\mathbf{v}_{\text{post}}$
+- 次任务：希望 $\mathbf{v}$ 接近某个期望速度 $\mathbf{v}_{\text{post}}$
 
-**注意 $\mathbf{v}_{\text{post}}$ 是速度量，不能直接等于位置目标**（如"关节中位" $q_{\text{mid}}$）。当次任务的目标是让关节趋向某个位置（例如中位、避障、可操作度最大化等），需要先定义一个标量代价函数 $H(q)$（例如 $H(q) = -\frac{1}{2}\sum_i (q_i - q_{i,\text{mid}})^2$，即偏离中位的负代价），再用**梯度投影法**（Gradient Projection Method, Liegeois 1977）把代价函数的负梯度转成速度指令：
-
-$$
-\mathbf{v}_{\text{post}} = k_0 \, \nabla H(q)
-$$
-
-对上面的中位代价函数，$\nabla H(q) = -(q - q_{\text{mid}})$，代入得到最常见的形式（等价于比例控制）：
+**$\mathbf{v}_{\text{post}}$ 是速度量，不能直接等于位置目标**（如关节中位 $q_{\text{mid}}$）。当次任务是让关节趋向某个位置（中位、远离障碍、可操作度最大化等）时，先定义一个标量指标 $H(q)$，再用**梯度投影法**（Liégeois, 1977）把它的梯度转成速度指令：
 
 $$
-\mathbf{v}_{\text{post}} = k_0 \, (q_{\text{mid}} - q)
+\mathbf{v}_{\text{post}} = k_0\, \nabla H(q)
 $$
 
-如果次任务目标本身是随时间变化的轨迹 $q_{\text{desired}}(t)$（而不是静止的中位），则再加上前馈项构成 PD 形式：
+例如中位指标 $H(q) = -\frac{1}{2}\sum_i (q_i - q_{\text{mid},i})^2$，$\nabla H = -(q - q_{\text{mid}})$，得到最常见的形式（等价于比例控制）：
 
 $$
-\mathbf{v}_{\text{post}} = k_p \, (q_{\text{desired}}(t) - q) + k_d \, \dot{q}_{\text{desired}}(t)
+\mathbf{v}_{\text{post}} = k_0\,(q_{\text{mid}} - q)
+$$
+
+如果次任务目标是随时间变化的轨迹 $q_d(t)$，再加上前馈：
+
+$$
+\mathbf{v}_{\text{post}} = k_p\,(q_d(t) - q) + \dot{q}_d(t)
 $$
 
 **目标**：
@@ -828,141 +427,128 @@ $$
 \min_{\mathbf{v}} \|\mathbf{v} - \mathbf{v}_{\text{post}}\|^2 \quad \text{s.t.} \quad \mathbf{J}\mathbf{v} = \dot{\mathbf{x}}_{\text{des}}
 $$
 
-### 3.5.2 解的构造
+### 2.5.2 解的构造
 
-**步骤1**：求主任务的最小范数解
+**步骤 1**：主任务的最小范数解 $\mathbf{v}_1 = \mathbf{J}^\dagger\dot{\mathbf{x}}_{\text{des}}$
 
-$$
-\mathbf{v}_1 = \mathbf{J}^\dagger \dot{\mathbf{x}}_{\text{des}}
-$$
+**步骤 2**：次任务只能在零空间内调整，投影：$\mathbf{v}_2 = \mathbf{N}(\mathbf{v}_{\text{post}} - \mathbf{v}_1)$
 
-**步骤2**：将次任务目标投影到零空间
-
-次任务希望靠近 $\mathbf{v}_{\text{post}}$（由上述梯度投影/PD构造得到的速度指令），但只能在零空间内调整（不能影响主任务）。投影：
+**步骤 3**：合成
 
 $$
-\mathbf{v}_2 = \mathbf{N}(\mathbf{v}_{\text{post}} - \mathbf{v}_1)
+\mathbf{v}^* = \mathbf{v}_1 + \mathbf{N}(\mathbf{v}_{\text{post}} - \mathbf{v}_1)
 $$
 
-**步骤3**：合成总速度
+由于 $\mathbf{N}\mathbf{v}_1 = (\mathbf{I} - \mathbf{J}^\dagger\mathbf{J})\mathbf{J}^\dagger\dot{\mathbf{x}} = (\mathbf{J}^\dagger - \mathbf{J}^\dagger\mathbf{J}\mathbf{J}^\dagger)\dot{\mathbf{x}} = \mathbf{0}$，化简为：
 
 $$
-\mathbf{v}^* = \mathbf{v}_1 + \mathbf{v}_2 = \mathbf{J}^\dagger \dot{\mathbf{x}}_{\text{des}} + \mathbf{N}(\mathbf{v}_{\text{post}} - \mathbf{v}_1)
+\boxed{\;\mathbf{v}^* = \mathbf{J}^\dagger\dot{\mathbf{x}}_{\text{des}} + \mathbf{N}\,\mathbf{v}_{\text{post}}\;}
 $$
 
-简化（因为 $\mathbf{N}\mathbf{v}_1 = \mathbf{N}\mathbf{J}^\dagger \dot{\mathbf{x}} = (\mathbf{I} - \mathbf{J}^\dagger\mathbf{J})\mathbf{J}^\dagger \dot{\mathbf{x}} = \mathbf{0}$）：
+### 2.5.3 验证
+
+**主任务**（行满秩时）：
 
 $$
-\mathbf{v}^* = \mathbf{J}^\dagger \dot{\mathbf{x}}_{\text{des}} + \mathbf{N}\mathbf{v}_{\text{post}}
+\mathbf{J}\mathbf{v}^* = \mathbf{J}\mathbf{J}^\dagger\dot{\mathbf{x}}_{\text{des}} + \mathbf{J}\mathbf{N}\mathbf{v}_{\text{post}} = \dot{\mathbf{x}}_{\text{des}} + \mathbf{0}
 $$
 
-### 3.5.3 验证
+主任务精确满足 ✅。（秩亏时，$\mathbf{J}\mathbf{v}^*$ 是 $\dot{\mathbf{x}}_{\text{des}}$ 在可达方向上的投影，即最小二乘意义下最优。）
 
-**主任务**：
+**次任务**：在所有满足主任务的解中，$\mathbf{v}^*$ 使 $\|\mathbf{v} - \mathbf{v}_{\text{post}}\|^2$ 最小，证明见下节。
 
-$$
-\mathbf{J}\mathbf{v}^* = \mathbf{J}(\mathbf{J}^\dagger \dot{\mathbf{x}}_{\text{des}} + \mathbf{N}\mathbf{v}_{\text{post}}) = \mathbf{J}\mathbf{J}^\dagger \dot{\mathbf{x}}_{\text{des}} + \mathbf{J}\mathbf{N}\mathbf{v}_{\text{post}} = \dot{\mathbf{x}}_{\text{des}} + \mathbf{0}
-$$
+### 2.5.4 最优性证明
 
-主任务精确满足 ✅
-
-**次任务**：在所有满足主任务的解中，$\mathbf{v}^*$ 使 $\|\mathbf{v} - \mathbf{v}_{\text{post}}\|^2$ 最小（完整证明见3.5.4）。
-
-### 3.5.4 最优性证明
-
-任何满足主任务的解可写为 $\mathbf{v} = \mathbf{v}_1 + \mathbf{v}_{\text{null}}$，其中 $\mathbf{v}_{\text{null}} \in \mathcal{N}(\mathbf{J})$。
-
-目标：
+满足主任务的解都可写为 $\mathbf{v} = \mathbf{v}_1 + \mathbf{N}\mathbf{w}$（性质 4）。问题变为对 $\mathbf{w}$ 的无约束最小化：
 
 $$
-\min_{\mathbf{v}_{\text{null}} \in \mathcal{N}(\mathbf{J})} \|\mathbf{v}_1 + \mathbf{v}_{\text{null}} - \mathbf{v}_{\text{post}}\|^2
+\min_{\mathbf{w}} \|\mathbf{v}_1 + \mathbf{N}\mathbf{w} - \mathbf{v}_{\text{post}}\|^2
 $$
 
-展开：
+对 $\mathbf{w}$ 求导令其为零，利用 $\mathbf{N}^T = \mathbf{N}$、$\mathbf{N}^T\mathbf{N} = \mathbf{N}$：
 
 $$
-\|\mathbf{v}_1 + \mathbf{v}_{\text{null}} - \mathbf{v}_{\text{post}}\|^2 = \|\mathbf{v}_1 - \mathbf{v}_{\text{post}}\|^2 + 2(\mathbf{v}_1 - \mathbf{v}_{\text{post}})^T \mathbf{v}_{\text{null}} + \|\mathbf{v}_{\text{null}}\|^2
-$$
-
-因为 $\mathbf{v}_{\text{null}} \in \mathcal{N}(\mathbf{J}) = \text{Range}(\mathbf{N})$，可写为 $\mathbf{v}_{\text{null}} = \mathbf{N}\mathbf{w}$。
-
-代入并对 $\mathbf{w}$ 求导：
-
-$$
-\nabla_{\mathbf{w}} = 2\mathbf{N}^T(\mathbf{v}_1 - \mathbf{v}_{\text{post}}) + 2\mathbf{N}^T\mathbf{N}\mathbf{w} = \mathbf{0}
-$$
-
-因为 $\mathbf{N}^T = \mathbf{N}$（对称）且 $\mathbf{N}^T\mathbf{N} = \mathbf{N}$（幂等），得：
-
-$$
+2\mathbf{N}(\mathbf{v}_1 - \mathbf{v}_{\text{post}}) + 2\mathbf{N}\mathbf{w} = \mathbf{0}
+\;\Longrightarrow\;
 \mathbf{N}\mathbf{w}^* = \mathbf{N}(\mathbf{v}_{\text{post}} - \mathbf{v}_1)
 $$
 
-因此 $\mathbf{v}^*_{\text{null}} = \mathbf{N}(\mathbf{v}_{\text{post}} - \mathbf{v}_1)$，总速度：
+所以
 
 $$
-\mathbf{v}^* = \mathbf{v}_1 + \mathbf{N}(\mathbf{v}_{\text{post}} - \mathbf{v}_1) = \mathbf{J}^\dagger \dot{\mathbf{x}}_{\text{des}} + \mathbf{N}\mathbf{v}_{\text{post}}
+\mathbf{v}^* = \mathbf{v}_1 + \mathbf{N}(\mathbf{v}_{\text{post}} - \mathbf{v}_1) = \mathbf{J}^\dagger\dot{\mathbf{x}}_{\text{des}} + \mathbf{N}\mathbf{v}_{\text{post}}
 $$
+
+目标函数关于 $\mathbf{w}$ 是凸的，驻点即全局最优。
 
 ---
 
-## 3.6 实际实现中的修正：阻尼伪逆
+## 2.6 阻尼伪逆：数值稳定性与精度的权衡
 
-### 3.6.1 纯伪逆的数值问题
+### 2.6.1 纯伪逆的问题
 
-纯Moore-Penrose伪逆 $\mathbf{J}^\dagger = \mathbf{J}^T (\mathbf{J}\mathbf{J}^T)^{-1}$ 在奇异配置下（$\det(\mathbf{J}\mathbf{J}^T) \approx 0$）数值不稳定。
+接近奇异时 $\sigma_{\min} \to 0$，伪逆中的 $1/\sigma_{\min} \to \infty$：末端一个很小的期望速度，也会要求关节以极大速度运动，表现为关节**跳变**。若用 $\mathbf{J}^T(\mathbf{J}\mathbf{J}^T)^{-1}$ 计算，$\kappa(\mathbf{J}\mathbf{J}^T) = \sigma_{\max}^2/\sigma_{\min}^2$，数值误差也会被放大。
 
-**条件数**：
-
-$$
-\kappa(\mathbf{J}\mathbf{J}^T) = \frac{\sigma^2_{\max}}{\sigma^2_{\min}}
-$$
-
-当 $\sigma_{\min} \to 0$ 时，条件数 $\to \infty$，计算 $(\mathbf{J}\mathbf{J}^T)^{-1}$ 产生巨大误差。
-
-### 3.6.2 阻尼伪逆（Damped Pseudoinverse）
-
-**仅在需要数值稳定性时**使用阻尼伪逆：
+### 2.6.2 阻尼伪逆
 
 $$
-\mathbf{J}^\dagger_\lambda = \mathbf{J}^T (\mathbf{J}\mathbf{J}^T + \lambda\mathbf{I})^{-1}
+\mathbf{J}^\dagger_\lambda = \mathbf{J}^T(\mathbf{J}\mathbf{J}^T + \lambda\mathbf{I})^{-1} = (\mathbf{J}^T\mathbf{J} + \lambda\mathbf{I})^{-1}\mathbf{J}^T
 $$
 
-**效果**：
+在 SVD 下，每个方向的增益从 $1/\sigma_i$ 变为
 
-- 条件数：$\kappa(\mathbf{J}\mathbf{J}^T + \lambda\mathbf{I}) \leq \frac{\sigma^2_{\max} + \lambda}{\lambda}$（有界）
-- 代价：主任务不再精确满足，产生误差 $O(\lambda)$
+$$
+\frac{\sigma_i}{\sigma_i^2 + \lambda}
+\quad\begin{cases}
+\approx 1/\sigma_i, & \sigma_i \gg \sqrt{\lambda}\;\;\text{（远离奇异：几乎不受影响）} \\
+\leq \dfrac{1}{2\sqrt{\lambda}}, & \text{任何情况（关节速度有上界）} \\
+\to 0, & \sigma_i \to 0\;\;\text{（平滑地放弃该方向）}
+\end{cases}
+$$
 
-**使用场景**：
-- 理论推导：使用纯伪逆 $\mathbf{J}^\dagger$
-- 实际计算：接近奇异时切换到 $\mathbf{J}^\dagger_\lambda$（$\lambda \sim 0.01$）
+它等价于[加权最小二乘](QP_WBC.md#1-加权最小二乘本项目实现)只保留主任务和阻尼项（$\mathbf{W} = \mathbf{I}$，$\mathbf{W}_p = \mathbf{0}$），所以加权最小二乘中的 $\lambda\mathbf{I}$ 起的就是同样的作用。
 
-**本章推导均基于纯伪逆**，阻尼项是实现细节而非理论必需。
+**代价**：
+1. **主任务不再精确满足**：远离奇异时误差约为 $\lambda/\sigma_i^2$ 量级，接近奇异时该方向基本被放弃；
+2. **零空间隔离被轻微破坏**：用 $\mathbf{N}_\lambda = \mathbf{I} - \mathbf{J}^\dagger_\lambda\mathbf{J}$ 时，
+
+$$
+\mathbf{J}\mathbf{N}_\lambda = \mathbf{J} - \mathbf{J}\mathbf{J}^\dagger_\lambda\mathbf{J} = \lambda(\mathbf{J}\mathbf{J}^T + \lambda\mathbf{I})^{-1}\mathbf{J} \neq \mathbf{0}
+$$
+
+   在每个奇异方向上，次任务会以 $\lambda/(\sigma_i^2 + \lambda)$ 的比例“漏”进主任务。远离奇异时可以忽略，接近奇异时会变得明显。
+
+**实用做法**：
+- 主任务特解用阻尼伪逆（保证平滑）；
+- 投影矩阵 $\mathbf{N}$ 用 SVD 直接构造（取 $\mathbf{V}$ 中 $\sigma_i$ 很小的那些列张成零空间），或者接受轻微泄漏；
+- 也可以只在接近奇异时启用阻尼：$\lambda$ 随 $\sigma_{\min}$ 自适应变化，例如 $\lambda = \lambda_0\,(1 - (\sigma_{\min}/\sigma_0)^2)$（$\sigma_{\min} < \sigma_0$ 时），否则 $\lambda = 0$。
+
+> 本章 2.2–2.5 节的推导基于纯伪逆，结论在远离奇异时成立；实际实现几乎总要引入阻尼，此时上述两点代价需要考虑。
 
 ---
 
-## 3.7 案例：用标准臂角 $\psi$ 驱动零空间速度
+## 2.7 案例：用标准臂角 $\psi$ 驱动零空间速度
 
-前几节的次任务（关节中位、关节PD轨迹）都是把 $\mathbf{v}_{\text{post}}$ 直接定义在关节空间。本节给出另一类常见做法：**先定义一个有物理意义的标量自由度 $\psi(q)$（臂角/swivel angle），再driving它的变化率，通过 $\psi$ 自己的雅可比反过来映射回关节速度**。这是7-DOF冗余臂（3+1+3, SRS构型）零空间参数化最常用的方法之一。
+前几节的次任务都直接定义在关节空间。本节给出另一类常用做法：**先定义一个有物理意义的标量指标 $\psi(q)$（臂角），控制它的变化率，再通过 $\psi$ 的雅可比映射回关节速度**。这是 7 自由度冗余臂（3+1+3，SRS 构型）零空间参数化最常用的方法之一。
 
-### 3.7.1 问题背景
+### 2.7.1 问题背景
 
-对SRS构型的7-DOF臂（肩3自由度 + 肘1自由度 + 腕3自由度），末端位姿（6维）固定时，理论上还剩 $7-6=1$ 维零空间自由度。这个自由度不是任意某个关节角，而是**肘部绕"肩-腕连线"这根轴自转的相位**——因为末端固定时，肩点 $S$、腕点 $W$ 位置和朝向都不变，只有肘点 $E$ 还能在一个以 $SW$ 为轴的圆上滑动。这个"肘部在圆上转到哪个角度"就是臂角 $\psi$。
+SRS 构型 7 自由度臂（肩 3 + 肘 1 + 腕 3）末端位姿固定时，还剩 $7 - 6 = 1$ 维零空间。这个自由度不是某个关节角，而是**肘部绕“肩–腕连线”自转的相位**：末端固定时，肩点 $S$、腕点 $W$ 都不动，只有肘点 $E$ 能在以 $SW$ 为轴的圆上滑动。肘部在圆上转到哪个角度，就是臂角 $\psi$。
 
-$\psi$ 相比直接用某个关节角（如 `left_joint3`）做零空间指标的优势：$\psi$ 严格对应这唯一的自运动自由度，是几何不变量，不依赖具体某个关节的转轴方向和范围；而单个关节角混杂了臂型（肘弯曲程度）和自转两种效应，用来做"零空间摆动"的可视化或控制目标时容易产生歧义（3.7.5节会展示实测对比）。
+> 在本机器人上，如果把躯干和底盘也算进来，零空间的维度会更高。本案例只用手臂关节完成臂角摆动，$\psi$ 对应的是手臂自身的那 1 维自运动。
 
-### 3.7.2 臂角的几何定义
+**为什么用 $\psi$ 而不用单个关节角**（如 `left_joint3`）：$\psi$ 严格对应这唯一的自运动自由度，是几何不变量；单个关节角混杂了肘部弯曲和自转两种效应，用作零空间指标时容易产生歧义。
 
-设肩点 $S$、肘点 $E$、腕点 $W$ 的世界坐标分别为 $\mathbf{p}_S, \mathbf{p}_E, \mathbf{p}_W$，定义：
+### 2.7.2 臂角的几何定义
+
+设肩、肘、腕的世界坐标为 $\mathbf{p}_S, \mathbf{p}_E, \mathbf{p}_W$：
 
 $$
-\mathbf{e} = \mathbf{p}_E - \mathbf{p}_S \quad (\text{肩到肘})，\qquad
-\mathbf{w} = \mathbf{p}_W - \mathbf{p}_S \quad (\text{肩到腕})
+\mathbf{e} = \mathbf{p}_E - \mathbf{p}_S \;(\text{肩到肘}), \qquad
+\mathbf{w} = \mathbf{p}_W - \mathbf{p}_S \;(\text{肩到腕})
 $$
 
-再选定一个**参考方向** $\mathbf{V}$（用于确定 $\psi=0$ 的基准平面，通常取重力方向或某个固定世界方向；本项目实现中取世界坐标 $-Z$，即重力方向）。
-
-**几何构造**（如下图）：
+再选一个**参考方向** $\mathbf{V}$，用于确定 $\psi = 0$ 的基准。本项目取世界坐标 $-Z$（重力方向）。
 
 ```mermaid
 graph TB
@@ -973,178 +559,125 @@ graph TB
     end
 ```
 
-![image-20260805160825982](/home/molufan/WBC/README_pics/image-20260805160825982.png)
+![臂角几何定义](README_pics/image-20260805160825982.png)
 
-以肩腕连线 $\mathbf{w}$ 为轴，构造垂直于 $\mathbf{w}$ 的参考平面基向量：
+以 $\mathbf{w}$ 为轴，构造垂直于 $\mathbf{w}$ 的参考方向：
+
 $$
 \hat{\mathbf{w}} = \frac{\mathbf{w}}{\|\mathbf{w}\|}, \qquad
 \mathbf{l} = (\mathbf{w} \times \mathbf{V}) \times \mathbf{w}, \qquad
 \hat{\mathbf{l}} = \frac{\mathbf{l}}{\|\mathbf{l}\|}
 $$
 
-$\mathbf{l}$ 是 $\mathbf{V}$ 投影到垂直于 $\mathbf{w}$ 的平面内的方向，充当 $\psi=0$ 的参考基准。
+$\mathbf{l}$ 是 $\mathbf{V}$ 在垂直于 $\mathbf{w}$ 的平面内的投影方向，作为 $\psi = 0$ 的基准。
 
-再把肘部方向 $\mathbf{e}$ 投影到同一个垂直平面：
+把 $\mathbf{e}$ 分解为沿 $\mathbf{w}$ 和垂直于 $\mathbf{w}$ 的两部分：
 
 $$
 \mathbf{d} = \hat{\mathbf{w}}(\hat{\mathbf{w}}^T\mathbf{e}), \qquad
-\mathbf{p} = \mathbf{e} - \mathbf{d} = (\mathbf{I} - \hat{\mathbf{w}}\hat{\mathbf{w}}^T)\mathbf{e}
+\mathbf{p} = \mathbf{e} - \mathbf{d} = (\mathbf{I} - \hat{\mathbf{w}}\hat{\mathbf{w}}^T)\,\mathbf{e}
 $$
 
-$\mathbf{d}$ 是 $\mathbf{e}$ 沿 $\mathbf{w}$ 方向的分量（"肘部张开程度"，这部分和 $\psi$ 无关），$\mathbf{p}$ 是垂直于 $\mathbf{w}$ 的分量，也就是肘部相对"肩腕轴"的**径向位置**——它才是随自运动旋转的量。
+- $\mathbf{d}$：沿肩腕轴的分量，反映肘部弯曲程度，自运动时不变；
+- $\mathbf{p}$：垂直于肩腕轴的径向分量，**随自运动旋转**。
 
 ```mermaid
 graph LR
-    e["e (肩到肘)"] -->|沿w方向投影| d["d (张开分量,不变)"]
-    e -->|垂直于w的分量| p["p (径向位置, 随psi旋转)"]
+    e["e (肩到肘)"] -->|沿 w 方向投影| d["d (弯曲分量, 不变)"]
+    e -->|垂直于 w 的分量| p["p (径向位置, 随 ψ 旋转)"]
 ```
 
-**臂角** $\psi$ 就是 $\mathbf{p}$ 相对参考方向 $\hat{\mathbf{l}}$（或等价地用 $\hat{\mathbf{V}}$，见3.7.3节说明）在这个垂直平面内转过的角度：
+**臂角** $\psi$ 是 $\mathbf{p}$ 相对参考方向在垂直平面内转过的有符号角度：
 
 $$
-\psi = \operatorname{atan2}\!\big(\hat{\mathbf{w}}^T(\hat{\mathbf{V}} \times \mathbf{p}),\ \hat{\mathbf{V}} \cdot \mathbf{p}\big)
+\psi = \operatorname{atan2}\!\big(\hat{\mathbf{w}}^T(\hat{\mathbf{V}} \times \mathbf{p}),\; \hat{\mathbf{V}}^T\mathbf{p}\big), \qquad \hat{\mathbf{V}} = \frac{\mathbf{V}}{\|\mathbf{V}\|}
 $$
 
-其中 $\hat{\mathbf{V}} = \mathbf{V}/\|\mathbf{V}\|$。这是一个有符号、可以连续跨越 $\pm 180°$ 的角，与3.2节讨论过的"肘部偏离肩腕连线的夹角大小"（$\operatorname{atan2}(\|\mathbf{p}\|, \|\mathbf{d}\|)$，恒非负）是两个不同的量——后者衡量肘部弯曲程度（末端固定、肘部自转时几乎不变），前者才是自运动的相位参数（肘部自转时连续变化）。
+这里用 $\hat{\mathbf{V}}$ 和用 $\hat{\mathbf{l}}$ 得到的 $\psi$ 相同：因为 $\mathbf{p} \perp \mathbf{w}$，有 $\mathbf{l}^T\mathbf{p} = \|\mathbf{w}\|^2\,\mathbf{V}^T\mathbf{p}$，atan2 的两个参数被同一个正数缩放，角度不变。
 
-### 3.7.3 臂角雅可比 $J_c$
+$\psi$ 可以连续跨越 $\pm 180°$。注意不要和“肘部偏离肩腕连线的夹角” $\operatorname{atan2}(\|\mathbf{p}\|, \|\mathbf{d}\|)$ 混淆：后者恒非负、反映弯曲程度，自运动时几乎不变；前者才是自运动的相位。
 
-$\psi$ 对关节速度的关系记作：
-
-$$
-\dot\psi = \mathbf{J}_c \dot{\mathbf{q}}
-$$
-
-$\mathbf{J}_c$ 是 $1 \times n$ 的行向量（$\psi$ 是标量），由肘部位置雅可比 $\mathbf{J}_1 = \partial \mathbf{p}_E/\partial \mathbf{q}$（$3\times n$）和腕部位置雅可比 $\mathbf{J}_2 = \partial \mathbf{p}_W/\partial \mathbf{q}$（$3\times n$）组装：
+### 2.7.3 臂角雅可比 $\mathbf{J}_c$
 
 $$
-\mathbf{J}_c = \frac{(\hat{\mathbf{w}} \times \hat{\mathbf{p}})^T}{\|\mathbf{p}\|} \mathbf{J}_1
-+ \left\{ \frac{\mathbf{V}^T \mathbf{w}}{\|\mathbf{l}\|} (\hat{\mathbf{w}} \times \hat{\mathbf{l}})^T
-- \frac{\hat{\mathbf{w}}^T \mathbf{e}}{\|\mathbf{w}\|\|\mathbf{p}\|} (\hat{\mathbf{w}} \times \hat{\mathbf{p}})^T \right\} \mathbf{J}_2
+\dot\psi = \mathbf{J}_c\,\dot{\mathbf{q}}, \qquad \mathbf{J}_c \in \mathbb{R}^{1 \times n}
 $$
 
-（本项目肩点 $S$ 对受控关节固定不动，故 $\partial \mathbf{e}/\partial \mathbf{q} = \mathbf{J}_1$、$\partial \mathbf{w}/\partial \mathbf{q} = \mathbf{J}_2$，无需额外引入肩部雅可比项；若肩点本身也会移动，需在 $\mathbf{J}_1,\mathbf{J}_2$ 前分别减去肩部位置雅可比。）
-
-$\mathbf{J}_1, \mathbf{J}_2$ 直接用第1章1.2.2节提到的 `mj_jacSite`/等价的 `mj_jacBody` 数值算出，不需要手动展开 $z_i \times \mathbf{O}$ 的解析形式。
-
-### 3.7.4 零空间速度合成
-
-有了 $\mathbf{J}_c$，就能把"驱动臂角按某条轨迹 $\psi_{\text{des}}(t)$ 摆动"这个次任务，构造成3.5节标准形式的 $\mathbf{v}_{\text{post}}$：
-
-**第1步**：用PD控制把期望臂角轨迹转成期望的 $\dot\psi$ 指令（呼应3.5.1节"位置目标必须先转成速度"的结论）：
+由肘部位置雅可比 $\mathbf{J}_1 = \partial\mathbf{p}_E/\partial\mathbf{q}$ 和腕部位置雅可比 $\mathbf{J}_2 = \partial\mathbf{p}_W/\partial\mathbf{q}$（均为 $3 \times n$）组装：
 
 $$
-\dot\psi_{\text{cmd}} = k_p(\psi_{\text{des}}(t) - \psi) + k_d\,\dot\psi_{\text{des}}(t)
+\mathbf{J}_c = \frac{(\hat{\mathbf{w}} \times \hat{\mathbf{p}})^T}{\|\mathbf{p}\|}\,\mathbf{J}_1
++ \left\{ \frac{\mathbf{V}^T\mathbf{w}}{\|\mathbf{l}\|}\,(\hat{\mathbf{w}} \times \hat{\mathbf{l}})^T
+- \frac{\hat{\mathbf{w}}^T\mathbf{e}}{\|\mathbf{w}\|\,\|\mathbf{p}\|}\,(\hat{\mathbf{w}} \times \hat{\mathbf{p}})^T \right\} \mathbf{J}_2
 $$
 
-**第2步**：$\dot\psi_{\text{cmd}}$ 是标量，$\mathbf{J}_c$ 是 $1\times n$ 行向量，要找一个关节速度 $\mathbf{v}_{\text{post}}$ 使 $\mathbf{J}_c\mathbf{v}_{\text{post}} = \dot\psi_{\text{cmd}}$，其中范数最小的解是（标量情形下Moore-Penrose伪逆的闭式解）：
+本案例中肩点 $S$ 不随受控关节运动，所以 $\partial\mathbf{e}/\partial\mathbf{q} = \mathbf{J}_1$、$\partial\mathbf{w}/\partial\mathbf{q} = \mathbf{J}_2$。如果肩点会动（如躯干也参与），需在 $\mathbf{J}_1$、$\mathbf{J}_2$ 中分别减去肩部位置雅可比。
+
+$\mathbf{J}_1$、$\mathbf{J}_2$ 直接用 `mj_jacBody` / `mj_jacSite` 计算（[QP_WBC.md §1.2.2](QP_WBC.md#122-末端速度与全身速度的关系)）。
+
+### 2.7.4 零空间速度合成
+
+把“臂角按轨迹 $\psi_d(t)$ 摆动”构造成 2.5 节的 $\mathbf{v}_{\text{post}}$：
+
+**第 1 步**：期望臂角轨迹 → 期望臂角速度（位置目标必须先转成速度，见 2.5.1 节）：
+
+$$
+\dot\psi_{\text{cmd}} = k_p\,(\psi_d(t) - \psi) + k_d\,\dot\psi_d(t)
+$$
+
+**第 2 步**：标量速度 → 关节速度。求使 $\mathbf{J}_c\mathbf{v}_{\text{post}} = \dot\psi_{\text{cmd}}$ 的最小范数解（行向量的伪逆）：
 
 $$
 \mathbf{v}_{\text{post}} = \frac{\mathbf{J}_c^T}{\mathbf{J}_c\mathbf{J}_c^T}\,\dot\psi_{\text{cmd}}
 $$
 
-**第3步**：代入3.5.2节的合成公式，把 $\mathbf{v}_{\text{post}}$ 投影到主任务（双手末端固定）的零空间：
+**第 3 步**：投影到主任务（双手末端固定）的零空间：
 
 $$
-\mathbf{v}^* = \mathbf{J}^\dagger \dot{\mathbf{x}}_{\text{des}} + \mathbf{N}\,\mathbf{v}_{\text{post}}
+\mathbf{v}^* = \mathbf{J}^\dagger\dot{\mathbf{x}}_{\text{des}} + \mathbf{N}\,\mathbf{v}_{\text{post}}
 $$
 
-$\mathbf{N} = \mathbf{I} - \mathbf{J}^\dagger\mathbf{J}$ 仍是双手末端任务（$\mathbf{J}$，12维）的零空间投影矩阵，与 $\mathbf{J}_c$（臂角任务的雅可比）是两个不同的雅可比，不要混淆：$\mathbf{J}$ 决定"什么运动不影响末端"，$\mathbf{J}_c$ 决定"关节怎么动才能让 $\psi$ 按预期变化"。
+注意区分两个雅可比：$\mathbf{J}$（双手末端，12 行）决定“什么运动不影响末端”；$\mathbf{J}_c$（臂角，1 行）决定“关节怎么动才能让 $\psi$ 按预期变化”。
 
-### 3.7.5 与代码的对应（`demo_arm_angle_swivel.py`）
+由于 $\mathbf{v}_{\text{post}}$ 被投影后，$\mathbf{J}_c\mathbf{N}\mathbf{v}_{\text{post}}$ 一般不再精确等于 $\dot\psi_{\text{cmd}}$，实际摆动幅度会比指令小一些。若要让臂角也被精确跟踪，可以把它作为第 2 层任务，用多层零空间投影（2.8 节）求解。
+
+### 2.7.5 与代码的对应（`demo_arm_angle_swivel.py`）
 
 | 数学量 | 代码 |
 |---|---|
-| $\mathbf{p}_S,\mathbf{p}_E,\mathbf{p}_W$ | `d.xpos[shoulder_body]`, `d.xpos[elbow_body]`, `d.site_xpos[wrist_site]` |
+| $\mathbf{p}_S, \mathbf{p}_E, \mathbf{p}_W$ | `d.xpos[shoulder_body]`、`d.xpos[elbow_body]`、`d.site_xpos[wrist_site]` |
 | $\psi$ 及中间几何量 | `compute_swivel_geometry()` |
-| $\mathbf{J}_1,\mathbf{J}_2$ | `wbc.body_jacobian("left_link4")`, `wbc.site_jacobian("left_ee")[:3,:]` |
+| $\mathbf{J}_1, \mathbf{J}_2$ | `wbc.body_jacobian("left_link4")`、`wbc.site_jacobian("left_ee")[:3, :]` |
 | $\mathbf{J}_c$（解析） | `compute_Jc_analytical()` |
-| $\mathbf{J}_c$（有限差分校验） | `compute_Jc_fd()`，逐关节扰动 $q_i+\epsilon$ 重新算 $\psi$，与前文 `check_jacobian()` 思路一致——只校验、不参与实际控制 |
-| $\dot\psi_{\text{cmd}}$（PD） | `psidot_l_cmd = kp_psi*(psi_l_des - psi) + kd_psi*psi_l_des_dot` |
-| $\mathbf{v}_{\text{post}} = \mathbf{J}_c^T/(\mathbf{J}_c\mathbf{J}_c^T)\cdot\dot\psi_{\text{cmd}}$ | `v_secondary += (Jc_l / (Jc_l@Jc_l)) * psidot_l_cmd` |
-| $\mathbf{v}^* = \mathbf{v}_1 + \mathbf{N}\mathbf{v}_{\text{post}}$ | `qd_total = qd_main + null_gain * (N @ v_secondary)` |
+| $\mathbf{J}_c$（有限差分校验） | `compute_Jc_fd()`：逐关节扰动后重算 $\psi$，只用于校验，不参与控制 |
+| $\mathbf{J}^\dagger$、$\mathbf{N}$ | 阻尼伪逆 `J.T @ inv(J @ J.T + 0.01*I)`，`N = I - J_pinv @ J`（2.6 节的 $\mathbf{N}_\lambda$） |
+| $\dot\psi_{\text{cmd}}$ | `kp_psi * (psi_des - psi) + kd_psi * psi_des_dot`（`kp_psi = 4.0`，`kd_psi = 0.3`） |
+| $\mathbf{v}_{\text{post}}$ | `v_secondary += (Jc / (Jc @ Jc)) * psidot_cmd` |
+| $\mathbf{v}^*$ | `qd_total = qd_main + null_gain * (N @ v_secondary)`（`null_gain = 0.5`） |
 
-实测（解析 $\mathbf{J}_c$ 与有限差分对比）最大误差 $\sim 5\times10^{-7}$，验证公式实现无误；主循环里双手末端误差稳定在 2mm 以内，同时 $\psi$ 按 $\pm45°$ 正弦轨迹连续摆动——这正是标准臂角参数化下零空间自运动的直接体现，区别于旧版demo里用单一关节PD控制、观测量却是"肘部弯曲角"（该角在此运动下基本不变）的错配问题。
+**结果**：解析 $\mathbf{J}_c$ 与有限差分的最大误差约 $5 \times 10^{-7}$；双手末端误差稳定在 2 mm 以内，同时 $\psi$ 按正弦轨迹连续摆动（指令幅度 `psi_amplitude = 25°`，频率 0.5 Hz）。实际幅度小于指令，原因有三：`null_gain = 0.5` 直接打折；PD 跟踪在该频率下有相位滞后和幅值衰减；投影后 $\mathbf{J}_c\mathbf{N}\mathbf{v}_{\text{post}} \neq \mathbf{J}_c\mathbf{v}_{\text{post}}$。
 
----
-
-> [1].[七自由度冗余机械臂扩展任务逆运动学:扩展雅可比法](https://cloud.tencent.com/developer/article/1737044?policyId=1004).
-
-
-
-
+> 参考：[七自由度冗余机械臂扩展任务逆运动学：扩展雅可比法](https://cloud.tencent.com/developer/article/1737044?policyId=1004)
 
 ---
 
+## 2.8 推广到多层，与分层 QP 的关系
+
+2.5 节只有两层（主任务 + 次任务）。按优先级排列的 $K$ 个任务 $(\mathbf{J}_k, \dot{\mathbf{x}}_k)$ 可以递推求解：
+
+$$
+\mathbf{v}_1 = \mathbf{J}_1^\dagger\dot{\mathbf{x}}_1, \qquad
+\mathbf{v}_k = \mathbf{v}_{k-1} + (\mathbf{J}_k\mathbf{N}_{k-1})^\dagger(\dot{\mathbf{x}}_k - \mathbf{J}_k\mathbf{v}_{k-1}), \qquad
+\mathbf{N}_{k-1} = \mathbf{I} - \bar{\mathbf{J}}_{k-1}^\dagger\bar{\mathbf{J}}_{k-1}
+$$
+
+其中 $\bar{\mathbf{J}}_{k-1} = [\mathbf{J}_1; \ldots; \mathbf{J}_{k-1}]$ 是前 $k-1$ 层雅可比的堆叠。第 $k$ 层的修正量被限制在前面所有层的零空间里，所以不会影响高优先级任务。
+
+当 $K = 2$、第 2 层为“$\mathbf{v}$ 接近 $\mathbf{v}_{\text{post}}$”（$\mathbf{J}_2 = \mathbf{I}$）时，退化为 2.5 节的结果。
+
+**与分层 QP 的关系**：零空间投影只能处理等式任务，关节限位等不等式约束只能在求解后裁剪，而裁剪会破坏层间隔离。**分层 QP（HQP）在每一层都加入不等式约束**，可以看作“能处理不等式约束的零空间投影”；去掉不等式约束后，HQP 的解与上面的递推公式一致。详见 [QP_WBC.md §8](QP_WBC.md#8-分层-qphqp)。
 
 ---
 
-
----
-
-# 附录：公式推导
-
-### 推导 1：为什么是 $\mathbf{A}^{-1}\mathbf{b}$？
-
-目标函数：
-
-$$
-\mathcal{L}(\mathbf{v}) = (\mathbf{J}\mathbf{v} - \mathbf{b}_1)^T\mathbf{W}(\mathbf{J}\mathbf{v} - \mathbf{b}_1) + \lambda\mathbf{v}^T\mathbf{v} + (\mathbf{v} - \mathbf{v}_p)^T\mathbf{W}_p(\mathbf{v} - \mathbf{v}_p)
-$$
-
-其中 $\mathbf{b}_1 = K \cdot \mathbf{e}_{\text{pose}}$，$\mathbf{v}_p = \mathbf{v}_{\text{posture}}$。
-
-展开：
-
-$$
-\begin{aligned}
-\mathcal{L} &= \mathbf{v}^T\mathbf{J}^T\mathbf{W}\mathbf{J}\mathbf{v} - 2\mathbf{b}_1^T\mathbf{W}\mathbf{J}\mathbf{v} + \mathbf{b}_1^T\mathbf{W}\mathbf{b}_1 \\
-&\quad + \lambda\mathbf{v}^T\mathbf{v} \\
-&\quad + \mathbf{v}^T\mathbf{W}_p\mathbf{v} - 2\mathbf{v}_p^T\mathbf{W}_p\mathbf{v} + \mathbf{v}_p^T\mathbf{W}_p\mathbf{v}_p
-\end{aligned}
-$$
-
-对 $\mathbf{v}$ 求导：
-
-$$
-\frac{\partial \mathcal{L}}{\partial \mathbf{v}} = 2(\mathbf{J}^T\mathbf{W}\mathbf{J} + \lambda\mathbf{I} + \mathbf{W}_p)\mathbf{v} - 2\mathbf{J}^T\mathbf{W}\mathbf{b}_1 - 2\mathbf{W}_p\mathbf{v}_p
-$$
-
-令导数为零：
-
-$$
-(\mathbf{J}^T\mathbf{W}\mathbf{J} + \lambda\mathbf{I} + \mathbf{W}_p)\mathbf{v} = \mathbf{J}^T\mathbf{W}\mathbf{b}_1 + \mathbf{W}_p\mathbf{v}_p
-$$
-
-即 $\mathbf{A}\mathbf{v} = \mathbf{b}$，其中：
-- $\mathbf{A} = \mathbf{J}^T\mathbf{W}\mathbf{J} + \lambda\mathbf{I} + \mathbf{W}_p$（13×13 对称正定矩阵）
-- $\mathbf{b} = \mathbf{J}^T\mathbf{W}K \cdot \mathbf{e}_{\text{pose}} + \mathbf{W}_p \cdot \mathbf{v}_{\text{posture}}$
-
-解为：$\mathbf{v} = \mathbf{A}^{-1}\mathbf{b}$。
-
-### 推导 2：为什么 $\lambda\mathbf{I}$ 保证 $\mathbf{A}$ 可逆？
-
-- $\mathbf{J}^T\mathbf{W}\mathbf{J}$ 可能奇异（当关节处于奇异位形时）
-- 加上 $\lambda\mathbf{I}$（$\lambda > 0$）后，所有特征值至少为 $\lambda$
-- 因此 $\mathbf{A} = \mathbf{J}^T\mathbf{W}\mathbf{J} + \lambda\mathbf{I} + \mathbf{W}_p$ 必定正定、可逆
-
-这就是**Tikhonov 正则化**（也叫阻尼最小二乘）。
-
----
-
-**项目地址**：`/home/molufan/WBC`  
-**机器人模型**：`assets/galaxea_r1pro_standalone/`  
-**主要依赖**：MuJoCo 3.2+, NumPy 1.26+
-
----
-
-# 附录：MuJoCo 迁移说明
-
-本项目已从 PyBullet 完全迁移到 MuJoCo。主要改进：
-
-1. **雅可比精度提升 1000×**：从 5e-04 降至 4.6e-07
-2. **自动增益调谐**：基于质量矩阵的二阶系统参数化（`kp = ω²M`, `kv = 2ζωM`）
-3. **动态模式新增**：位置伺服驱动，支持重力补偿和执行器建模
-4. **模块化架构**：控制器与物理引擎解耦，便于真机部署
-
-详见 `MIGRATION_REPORT.md`。
+**机器人模型**：`assets/galaxea_r1pro_standalone/`
+**主要依赖**：MuJoCo 3.2+，NumPy 1.26+
