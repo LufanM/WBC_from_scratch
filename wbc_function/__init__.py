@@ -9,6 +9,7 @@ wbc_function —— 全身控制（WBC）求解器包。
     wls_solver.py         WLSSolver：加权最小二乘（闭式解，无不等式约束）
     wqp_solver.py         WQPSolver：加权 QP（qpOASES，支持约束）
     hqp_solver.py         HQPSolver：分层 QP（按 Task.priority 逐层求解，每层 qpOASES）
+    config.py             WBCConfig、SolverConfig：所有参数和默认值
     wbc_controller.py     WholeBodyController：末端到达全身控制器（应用层，
                           组合上面的组件；可选 WLS / WQP / HQP）
     qpoases_interface.py  qpOASES 的 Python 封装（编译、加载桥接库）
@@ -30,6 +31,7 @@ wbc_function —— 全身控制（WBC）求解器包。
 
 原理与接口对应关系见 QP_WBC.md §11。
 """
+from .config import SolverConfig, WBCConfig
 from .kinematics import MujocoKinematics, site_pose_task
 from .problem import LinearConstraint, Task, WBCProblem, WBCResult
 from .qpoases_interface import QP_INF, QpOasesSQP
@@ -67,5 +69,5 @@ __all__ = [
     # 求解器
     "WLSSolver", "WQPSolver", "HQPSolver", "make_solver", "QpOasesSQP", "QP_INF",
     # 应用层
-    "WholeBodyController", "TaskOutput",
+    "WholeBodyController", "TaskOutput", "WBCConfig", "SolverConfig",
 ]

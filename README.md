@@ -35,6 +35,7 @@
 | [WBC_PRINCIPLES.md](WBC_PRINCIPLES.md) | 原理：四种方法的分类与对比（第一章）、零空间投影推导（第二章） |
 | [QP_KKT_GUIDE.md](QP_KKT_GUIDE.md) | 入门：从无约束 QP 出发理解 KKT 条件和有约束 QP 的迭代求解（Active Set），配数值例子 |
 | [QP_WBC.md](QP_WBC.md) | 运动学 QP-WBC：加权最小二乘（本项目实现）、加权 QP 与分层 QP 的推导、约束建模、分层求解的完整例子（双手、躯干、底盘、安全盒）、求解器与实现 |
+| [HQP_GUIDE.md](HQP_GUIDE.md) | HQP 约束说明与调参说明：有哪些约束、每个参数管什么、调参顺序、常见问题 |
 
 ## 演示：臂角零空间控制
 
@@ -84,7 +85,7 @@
 | `test_wbc_function.py`、`test_dual_arm_ground.py`、`run_all_tests.sh` | 测试 |
 | `tools/` | 离线工具（模型转换、可视化、绘图、README 动图录制） |
 | `assets/` | 机器人模型（URDF / MJCF / 网格） |
-| `WBC_PRINCIPLES.md`、`QP_KKT_GUIDE.md`、`QP_WBC.md`、`README_pics/` | 文档与配图 |
+| `WBC_PRINCIPLES.md`、`QP_KKT_GUIDE.md`、`QP_WBC.md`、`HQP_GUIDE.md`、`README_pics/` | 文档与配图 |
 
 **核心库：`wbc_function/`**
 
@@ -203,6 +204,15 @@ WQP 在速度饱和时保持运动方向，所以收敛更快。`solver="wls"` �
 - ⏳ 实时碰撞约束
 - ⏳ MPC 轨迹优化（多步预测）
 - ⏳ 力控模式（阻抗控制）
+
+
+
+### 待优化项
+
+* ⏳阻尼下增大误差，误差也即纠正比例的计算原理
+* ⏳到达目标后，目标点不动，但身体会飘逸得问题
+
+
 
 ### MuJoCo 迁移说明
 

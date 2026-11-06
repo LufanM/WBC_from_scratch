@@ -15,49 +15,18 @@ wbc_function（WholeBodyController + HQPSolver），不再依赖 QPPlanner / yam
 无窗口自检：按固定脚本依次跑四种模式（含 模式4 vs 模式1 的放置点 A/B 对照），打印误差后退出：
   python3 demo_hqp_interactive.py --demo
 
-可选参数（与 C++ 版同名的含义相同）：
+参数：所有参数都有默认值，分组列表和默认值用 --help 查看，当前生效的值用 --print-params 查看；
+可以在命令行逐个给（--kp-pos 20 --torso-cost 1.0），也可以写成 JSON 文件用 --config 读入，
+命令行优先于文件。参数的含义和调法见 HQP_GUIDE.md。
+
+运行方式相关的选项：
   --robot r1        机器人：r1（默认，assets/ 中的 URDF 经 tools/convert_urdf.py 转换）、
                     r1_urdf（同一 URDF 用通用加载器 robots.load_urdf 加载），或 JSON 配置文件路径
   --base            底盘也参与规划（机器人有底盘关节时）。默认底盘不动，与 C++ 版一致
   --kinematic       运动学模式：关节直接等于指令（不经过物理仿真和执行器），用于排查控制本身
-  --solver hqp      求解器：hqp（默认）/ wqp / wls。wqp、wls 忽略优先级，可用来对照
-  --kp 12           末端、躯干位置 / 姿态比例增益 (1/s)。插值速度作为前馈加在上面
-  --max-pos-error 0.02 / --max-rot-error 0.1
-                    任务误差限幅 (m / rad)，0 = 不限。期望速度 = 前馈 + Kp·clip(误差)。
-                    目标够不到时误差一直很大，不限幅会让接近奇异的手臂在速度上限之间逐周期
-                    翻转（全身抖动）；限幅后不抖，正常跟踪（误差远小于限幅）不受影响。
-  --control-dt 0.01 控制周期 (s)，必须是模型物理步长 0.002 s 的整数倍
-  --command-base reference
-                    WBC 在哪个关节构型上计算、关节指令从哪里累加：
-                      reference（默认）  在参考构型 q_ref（上一周期的指令）上算正运动学和雅可比，
-                                         指令 = q_ref + v·dt。反馈回路里不含伺服动力学，伺服
-                                         慢也不会振荡；实测状态只用于误差、显示和防饱和
-                                         （q_ref 最多领先实测 0.05 rad）
-                      cmd                在实测构型上计算，指令 = 上一周期指令 + v·dt
-                      measured           在实测构型上计算，指令 = 实测 + v·dt（C++ 版的做法）
-                    位置伺服越慢差别越大：R1（伺服带宽 20 rad/s）上 cmd 会振荡、measured 有 0.2 m 稳态误差，
-                    reference 都没有；伺服很硬的机器人三者接近。
-  --place-dx 0.35   放置点相对初始手位置的前向距离 (m)
-  --hand-vmax 0.15  手目标插值的最大线速度 (m/s)
-  --torso-vmax 0.08 躯干目标插值的最大线速度 (m/s)
-  --movej-vmax 0.5  R 键 moveJ 回初始姿态时关节的峰值速度 (rad/s)，时长至少 1 s
-  --torso-leash 0   发给 HQP 的躯干目标最多领先躯干实测位置多少 (m)，0 = 不限（默认）。
-                    C++ 版默认 0.005，用来压住原规划器在躯干目标够不到时的 50 Hz 抖动；
-                    本仓库的 HQP 不需要（见 QP_WBC.md §8 / README），保留该选项用于对照。
-  --lambda 1e-4     全局阻尼 λ（目标函数里的 λ/2·||v||²），整个运行期间固定
-  --adaptive-lambda 0.05
-                    自适应阻尼上限 λmax，0 = 不开。每次求解前按两臂 sigma_min 重算（默认开）：
-                      λ = 基础值 + λmax·(1 − σmin/σ0)²   σmin < σ0 时（σmin 取两臂较小者）
-  --adaptive-lambda-sigma 0.1
-                    开始加阻尼的 σ0 (m/rad)
-  --print-track     周期打印左手、右手、躯干的目标 / 实测 / 误差
-  --print-period 0.5  打印周期（仿真时间 s），同时开启 --print-track
-  --dq-max 2.0      关节速度上限 (rad/s)，在 QP 中作为硬约束
   --data-record     记录到 hqp_sim_trace/<时间>/trace.csv，绘图用 tools/plot_trace.py
   --trace-dir DIR   指定记录目录（同时开启 --data-record）
   --debug-input     在终端打印收到的键盘 / 鼠标事件
-  --torso-return-gain 0
-                    模式1 下躯干回到初始位置的速度增益（每个控制周期纠正偏差的比例，0 <= k < 1）
 
 =========================== 控制模式设计 ===========================
 手和躯干各自有一个状态，四种控制形式就是这两个状态的组合：
@@ -103,6 +72,7 @@ wbc_function（WholeBodyController + HQPSolver），不再依赖 QPPlanner / yam
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import signal
@@ -115,12 +85,11 @@ import mujoco
 
 import robots
 import wbc_function as wf
+from wbc_function.config import add_arguments, apply_arguments, apply_dict, param, to_dict
 from wbc_function.tasks import quat_error
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-TORSO_MARGIN = 0.005        # 拖动目标离安全盒边界的余量 (m)
-UNREACHABLE_ERROR = 0.02    # 误差超过它持续 1 s 判为不可达 (m)
 
 
 LEFT, RIGHT, TORSO = 0, 1, 2
@@ -281,29 +250,57 @@ class PartState:
     unreachable: bool = False
 
 
+def demo_wbc_config():
+    """本程序的控制器参数：在 WBCConfig 默认值的基础上开误差限幅、关回中（与 C++ 版一致）。"""
+    return wf.WBCConfig(max_pos_error=0.02, max_rot_error=0.1, posture_k=0.0)
+
+
 @dataclass
 class Options:
-    solver: str = "hqp"
-    kp: float = 12.0
-    command_base: str = "reference"
-    kinematic: bool = False
-    max_pos_error: float = 0.02
-    max_rot_error: float = 0.1
-    control_dt: float = 0.01
-    place_dx: float = 0.35
-    hand_vmax: float = 0.15
-    hand_wmax: float = 0.5
-    torso_vmax: float = 0.08
-    t_min: float = 1.0
-    torso_return_gain: float = 0.0
-    dq_max: float = 2.0
-    movej_vmax: float = 0.5
-    torso_leash: float = 0.0
-    qp_lambda: float = 1e-4
-    adaptive_lambda: float = 0.05
-    adaptive_lambda_sigma: float = 0.1
-    print_track: bool = False
-    print_period: float = 0.5
+    """本程序的全部参数。wbc 为控制器和求解器的参数，其余是本程序自己的。"""
+    wbc: wf.WBCConfig = field(default_factory=demo_wbc_config)
+    solver: str = param("hqp", "求解器：hqp / wqp / wls", "运行", type=str)
+    control_dt: float = param(0.01, "控制周期 (s)，必须是模型物理步长的整数倍", "运行")
+    command_base: str = param("reference", "WBC 的计算构型和指令累加起点：reference / cmd / measured",
+                              "运行", type=str)
+    cmd_lead_max: float = param(0.05, "指令最多领先实测关节角多少 (rad)", "运行")
+    kinematic: bool = param(False, "运动学模式：关节直接等于指令，不经过物理仿真", "运行")
+    # 分层（数字越小越优先）
+    hand_priority: int = param(0, "双手任务所在层", "分层", type=int)
+    torso_priority: int = param(1, "躯干任务所在层", "分层", type=int)
+    box_priority: int = param(-1, "安全盒（软约束）所在层", "分层", type=int)
+    # 手臂和躯干
+    hand_weight: float = param(1.0, "手的任务权重", "手臂和躯干")
+    torso_weight: float = param(1.0, "躯干的任务权重", "手臂和躯干")
+    arm_cost: float = param(2e-3, "手臂关节的 W_p（动起来的代价）", "手臂和躯干")
+    torso_cost: float = param(0.2, "模式1 下躯干关节的 W_p", "手臂和躯干")
+    torso_return_gain: float = param(0.0, "模式1 下躯干回初始位置的增益（每周期纠正比例）", "手臂和躯干")
+    # 奇异处理
+    adaptive_lambda: float = param(0.05, "自适应阻尼上限 λmax，0 表示不开", "奇异处理")
+    adaptive_lambda_sigma: float = param(0.1, "开始加阻尼的 σ0 (m/rad)", "奇异处理")
+    # 躯干安全盒
+    box_soft: bool = param(True, "安全盒用软约束（否则硬约束）", "躯干安全盒")
+    box_beta: float = param(0.5, "安全盒的缓冲系数 β", "躯干安全盒")
+    box_w_lin: float = param(1e3, "软约束的线性罚权重", "躯干安全盒")
+    box_w_quad: float = param(1e1, "软约束的二次罚权重", "躯干安全盒")
+    torso_box: tuple = param(None, "安全盒 x_min x_max z_min z_max（世界坐标，覆盖机器人配置）",
+                             "躯干安全盒", nargs=4)
+    torso_box_margin: tuple = param(None, "自动安全盒：向后 向前 向下 向上 (m，覆盖机器人配置)",
+                                    "躯干安全盒", nargs=4)
+    torso_margin: float = param(0.005, "拖动目标离安全盒边界的余量 (m)", "躯干安全盒")
+    torso_leash: float = param(0.0, "躯干目标最多领先实测多少 (m)，0 表示不限", "躯干安全盒")
+    # 目标插值
+    hand_vmax: float = param(0.15, "手目标的最大线速度 (m/s)", "目标插值")
+    hand_wmax: float = param(0.5, "手目标的最大角速度 (rad/s)", "目标插值")
+    torso_vmax: float = param(0.08, "躯干目标的最大线速度 (m/s)", "目标插值")
+    t_min: float = param(1.0, "一段插值的最短时长 (s)", "目标插值")
+    movej_vmax: float = param(0.5, "R 键 moveJ 的峰值关节速度 (rad/s)", "目标插值")
+    place_dx: float = param(0.35, "P 键放置点的前向距离 (m)", "目标插值")
+    stress_hand_dx: float = param(None, "B 键压力点的前向距离 (m，覆盖机器人配置)", "目标插值")
+    # 显示
+    unreachable_error: float = param(0.02, "误差超过它持续 1 s 判为不可达 (m)", "显示")
+    print_track: bool = param(False, "周期打印目标 / 实测 / 误差", "显示")
+    print_period: float = param(0.5, "打印周期（仿真时间 s）", "显示")
 
 
 # ---------------------------------------------------------------- 仿真初始化
@@ -341,28 +338,29 @@ class InteractiveController:
         self.ee_sites = [r.left_ee_site, r.right_ee_site]
 
         frames = {"torso": {"body": r.torso_body, "components": tuple(r.torso_components),
-                            "priority": 1}}
+                            "priority": opt.torso_priority, "weight": opt.torso_weight}}
         # WBC 在 self.ref 上计算：reference 模式下它是参考构型，否则每周期复制实测状态
         self.ref = mujoco.MjData(model)
         self.wbc = wf.WholeBodyController(model, self.ref, self.joints, self.ee_sites,
                                           base_free=self.use_base, base_joints=r.base_joints,
-                                          solver=opt.solver, frames=frames, dt=self.dt)
+                                          solver=opt.solver, frames=frames, dt=self.dt,
+                                          config=opt.wbc)
         w = self.wbc
-        w.Kp_pos = w.Kp_rot = opt.kp
-        w.max_pos_error = opt.max_pos_error or None
-        w.max_rot_error = opt.max_rot_error or None
-        w.max_joint_vel = opt.dq_max
-        w.lambda_reg = opt.qp_lambda
-        self.lambda_base = opt.qp_lambda
+        self.lambda_base = opt.wbc.lambda_reg
         for site in self.ee_sites:
-            w.task(site).priority = 0                  # 双手：第 0 层
-        w.add_constraint("torso_box", self._torso_box)  # 第 -1 层（HQP）
+            w.task(site).priority = opt.hand_priority
+            w.task(site).weight = opt.hand_weight
+        w.set_joint_cost(r.arm_joints(), opt.arm_cost)
+        w.add_constraint("torso_box", self._torso_box)
         print(f"[wbc] robot = {r.name}, {len(self.joints)} joints"
               f"{' (base planned)' if self.use_base else ''}")
-        print(f"[wbc] solver = {opt.solver}, dq_max = {opt.dq_max} rad/s, lambda = {opt.qp_lambda}, "
-              f"Kp = {opt.kp} 1/s, control dt = {self.dt} s")
+        print(f"[wbc] task weight hand/torso = {opt.hand_weight}/{opt.torso_weight}, "
+              f"joint cost arm/torso(mode 1) = {opt.arm_cost}/{opt.torso_cost}")
+        c = opt.wbc
+        print(f"[wbc] solver = {opt.solver}, dq_max = {c.max_joint_vel} rad/s, lambda = {c.lambda_reg}, "
+              f"Kp = {c.kp_pos}/{c.kp_rot} 1/s, control dt = {self.dt} s")
         if opt.adaptive_lambda > 0.0:
-            print(f"[wbc] adaptive lambda: lambda = {opt.qp_lambda} + {opt.adaptive_lambda} * "
+            print(f"[wbc] adaptive lambda: lambda = {c.lambda_reg} + {opt.adaptive_lambda} * "
                   f"(1 - sigma_min / {opt.adaptive_lambda_sigma})^2 when sigma_min < "
                   f"{opt.adaptive_lambda_sigma}")
 
@@ -414,17 +412,15 @@ class InteractiveController:
             return self.d.xpos[self.m.body(self.robot.torso_body).id].copy()
         return self.hand_pose(p)[0]
 
-    CMD_LEAD_MAX = 0.05     # 指令（参考构型）最多领先实测关节角多少 (rad)，防止执行器卡住时越跑越远
-
     def _sync_ref(self):
         """准备 WBC 计算用的构型 self.ref：先复制实测状态；reference 模式下受控关节换成
-        上一周期的指令（限制在实测 ± CMD_LEAD_MAX 内）。"""
+        上一周期的指令（限制在实测 ± cmd_lead_max 内）。"""
         self.ref.qpos[:] = self.d.qpos
         self.ref.qvel[:] = 0.0
         if self.opt.command_base == "reference" and self.last_cmd is not None:
             q = self.read_q()
-            self.ref.qpos[self.wbc.qadr] = np.clip(self.last_cmd, q - self.CMD_LEAD_MAX,
-                                                   q + self.CMD_LEAD_MAX)
+            self.ref.qpos[self.wbc.qadr] = np.clip(self.last_cmd, q - self.opt.cmd_lead_max,
+                                                   q + self.opt.cmd_lead_max)
         mujoco.mj_kinematics(self.m, self.ref)
         mujoco.mj_comPos(self.m, self.ref)
 
@@ -440,10 +436,11 @@ class InteractiveController:
         self.parts[TORSO].home = self.measured(TORSO)
         self.torso_y = self.parts[TORSO].home[1]
         th = self.parts[TORSO].home
-        if self.robot.torso_box is not None:
-            self.box = tuple(self.robot.torso_box)
+        box = self.opt.torso_box if self.opt.torso_box is not None else self.robot.torso_box
+        if box is not None:
+            self.box = tuple(box)
         else:                            # 以初始躯干位置为中心自动给出
-            bx, fx, dz, uz = self.robot.torso_box_margin
+            bx, fx, dz, uz = self.opt.torso_box_margin or self.robot.torso_box_margin
             self.box = (th[0] - bx, th[0] + fx, th[2] - dz, th[2] + uz)
         x_min, x_max, z_min, z_max = self.box
         if not (x_min <= th[0] <= x_max and z_min <= th[2] <= z_max):
@@ -477,7 +474,7 @@ class InteractiveController:
         print(f"[target] {PART_NAMES[part]} drag cancelled")
 
     def drag_to(self, part, p):
-        target = self.clamp_torso(p, TORSO_MARGIN) if part == TORSO else np.array(p, float)
+        target = self.clamp_torso(p, self.opt.torso_margin) if part == TORSO else np.array(p, float)
         delta = target - self.parts[part].ghost
         self.parts[part].ghost = target
         if part != TORSO and self.link_hands:
@@ -529,9 +526,10 @@ class InteractiveController:
         now = self.time()
         self.apply_mode(mode_from_number(2), False)
         # 双手：初始位置前方 stress_hand_dx（手臂伸不到）；躯干：初始位置
-        dx = np.array([self.robot.stress_hand_dx, 0.0, 0.0])
+        stress_dx = self.opt.stress_hand_dx
+        dx = np.array([self.robot.stress_hand_dx if stress_dx is None else stress_dx, 0.0, 0.0])
         left, right = self.parts[LEFT].home + dx, self.parts[RIGHT].home + dx
-        self.parts[TORSO].ghost = self.clamp_torso(self.parts[TORSO].home, TORSO_MARGIN)
+        self.parts[TORSO].ghost = self.clamp_torso(self.parts[TORSO].home, self.opt.torso_margin)
         self.commit_torso(self.parts[TORSO].ghost, now)
         self.parts[LEFT].ghost, self.parts[RIGHT].ghost = left.copy(), right.copy()
         self.commit_hands(left, self.parts[LEFT].seg.ori_goal,
@@ -564,7 +562,7 @@ class InteractiveController:
     def move_torso_to(self, goal):
         """供 --demo 使用，等同拖躯干。返回实际下发的（夹到安全盒内的）目标。"""
         self.apply_mode(on_torso_target_event(self.mode), False)
-        self.parts[TORSO].ghost = self.clamp_torso(goal, TORSO_MARGIN)
+        self.parts[TORSO].ghost = self.clamp_torso(goal, self.opt.torso_margin)
         self.commit_torso(self.parts[TORSO].ghost, self.time())
         return self.parts[TORSO].ghost.copy()
 
@@ -605,7 +603,7 @@ class InteractiveController:
             return self.wbc.get_joint_positions()      # 参考构型（已在 _sync_ref 中限幅）
         if self.opt.command_base == "measured" or self.last_cmd is None:
             return q
-        return np.clip(self.last_cmd, q - self.CMD_LEAD_MAX, q + self.CMD_LEAD_MAX)
+        return np.clip(self.last_cmd, q - self.opt.cmd_lead_max, q + self.opt.cmd_lead_max)
 
     def _apply(self, cmd):
         self.last_cmd = cmd
@@ -668,13 +666,15 @@ class InteractiveController:
         return None
 
     def _torso_box(self, c):
-        """躯干安全盒：x、z 两行线性化约束（HQP 第 -1 层软约束：先最小化违反量）。"""
+        """躯干安全盒：x、z 两行线性化约束（默认为最高层的软约束：先最小化违反量）。"""
         p, _ = c.get_frame_pose("torso")
         J = c.frame_jacobian("torso")[[0, 2]]
         x_min, x_max, z_min, z_max = self.box
-        return wf.linearized_constraint("torso_box", J, p[[0, 2]], [x_min, z_min],
-                                        [x_max, z_max], self.dt, beta=0.5, soft=True,
-                                        priority=-1)
+        o = self.opt
+        return wf.linearized_constraint("torso_box", J, p[[0, 2]], [x_min, z_min], [x_max, z_max],
+                                        self.dt, beta=o.box_beta, soft=o.box_soft,
+                                        w_lin=o.box_w_lin, w_quad=o.box_w_quad,
+                                        priority=o.box_priority)
 
     # ---- --print-track
     @staticmethod
@@ -862,7 +862,7 @@ class InteractiveController:
             anchor = self.clamp_torso(pos, 0.0)
             self.parts[TORSO].seg.hold(anchor, IDENTITY_QUAT, now)
             self.reset_reachability(TORSO)
-            safe = self.clamp_torso(anchor, TORSO_MARGIN)   # 在边界余量带内：插值退回
+            safe = self.clamp_torso(anchor, self.opt.torso_margin)   # 在边界余量带内：插值退回
             self.parts[TORSO].ghost = safe
             if np.linalg.norm(safe - anchor) > 1e-9:
                 self.commit_torso(safe, now)
@@ -878,6 +878,10 @@ class InteractiveController:
         if self.mode.hands == HAND_FROZEN:
             frozen += self.robot.arm_joints()
         self.wbc.set_frozen(frozen)
+        # 躯干自由时，它动多少只由 W_p 决定；躯干力臂长，代价要比手臂大才不会抢着动。
+        # 其他模式躯干要么跟踪目标、要么冻结，用默认代价
+        free = self.mode.torso == TORSO_FREE
+        self.wbc.set_joint_cost(self.robot.torso_joints, self.opt.torso_cost if free else None)
 
     def update_errors(self):
         now = self.time()
@@ -892,7 +896,7 @@ class InteractiveController:
             if p == TORSO:
                 diff[1] = 0.0                 # 躯干 y 不是任务目标
             self.errors[p] = float(np.linalg.norm(diff))
-            if self.errors[p] > UNREACHABLE_ERROR:
+            if self.errors[p] > self.opt.unreachable_error:
                 if s.over_error_since < 0:
                     s.over_error_since = now
                 s.unreachable = now - s.over_error_since > 1.0
@@ -958,9 +962,10 @@ def run_demo(ctl: InteractiveController, place_dx):
 
     tol = 0.005
     vs = lambda err: (f"（参考阈值 {tol * 1000:.1f} mm：" + ("超出" if err > tol else "未超出") + "）")
-    a_note = (f"（超过不可达阈值 {UNREACHABLE_ERROR * 1000:.1f} mm，符合预期：仅手臂够不到）"
-              if err_arm_only > UNREACHABLE_ERROR else
-              f"（未超过不可达阈值 {UNREACHABLE_ERROR * 1000:.1f} mm：仅手臂也够到了）")
+    limit = ctl.opt.unreachable_error * 1000
+    a_note = (f"（超过不可达阈值 {limit:.1f} mm，符合预期：仅手臂够不到）"
+              if err_arm_only * 1000 > limit else
+              f"（未超过不可达阈值 {limit:.1f} mm：仅手臂也够到了）")
     print("\n===== demo result =====")
     print(f"A 模式4 仅手臂 -> 放置点(+{place_dx:.4f} m): 实际前伸 {reach_arm_only:.4f} m, "
           f"末端剩余误差 {err_arm_only * 1000:.4f} mm{a_note}")
@@ -1187,6 +1192,13 @@ class Viewer:
         self.glfw.swap_buffers(self.window)
 
     # ---- 回调
+    def _move_camera(self, action, reldx, reldy):
+        """新版 MuJoCo 的 mjv_moveCamera 没有 scene 参数，旧版有。"""
+        try:
+            mujoco.mjv_moveCamera(self.m, action, reldx, reldy, self.cam)
+        except TypeError:
+            mujoco.mjv_moveCamera(self.m, action, reldx, reldy, self.scene, self.cam)
+
     def on_key(self, window, key, scancode, action, mods):
         glfw = self.glfw
         if g_debug_input:
@@ -1275,7 +1287,7 @@ class Viewer:
             self.hover = self.pick(x, y)
             return
         action = mujoco.mjtMouse.mjMOUSE_MOVE_V if self.middle_down else mujoco.mjtMouse.mjMOUSE_ROTATE_V
-        mujoco.mjv_moveCamera(self.m, action, dx / height, dy / height, self.scene, self.cam)
+        self._move_camera(action, dx / height, dy / height)
 
     def on_focus(self, window, focused):
         if focused:
@@ -1288,8 +1300,7 @@ class Viewer:
         self.axis_key_last_press = [-1e9, -1e9, -1e9]
 
     def on_scroll(self, window, xoffset, yoffset):
-        mujoco.mjv_moveCamera(self.m, mujoco.mjtMouse.mjMOUSE_ZOOM, 0.0, -0.05 * yoffset,
-                              self.scene, self.cam)
+        self._move_camera(mujoco.mjtMouse.mjMOUSE_ZOOM, 0.0, -0.05 * yoffset)
 
     # ---- 主循环
     def run(self, sim_per_frame=None):
@@ -1352,63 +1363,60 @@ class Viewer:
 
 # ---------------------------------------------------------------- main
 def parse_args(argv):
-    ap = argparse.ArgumentParser(description="HQP / WBC interactive simulation",
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    """返回 (运行方式选项, Options)。参数的优先级：命令行 > --config 文件 > 默认值。"""
+    opt = Options()
+    ap = argparse.ArgumentParser(description="HQP / WBC interactive simulation")
     ap.add_argument("--robot", default="r1",
                     help=f"内置机器人 {list(robots.ROBOTS)}，或 JSON 配置文件（见 robots.py）")
     ap.add_argument("--base", action="store_true", help="底盘也参与规划（机器人有底盘关节时）")
-    ap.add_argument("--kinematic", action="store_true", help="关节直接等于指令，不经过物理仿真")
-    ap.add_argument("--demo", action="store_true")
-    ap.add_argument("--solver", choices=("hqp", "wqp", "wls"), default="hqp")
-    ap.add_argument("--kp", type=float, default=12.0)
-    ap.add_argument("--control-dt", type=float, default=0.01)
-    ap.add_argument("--command-base", choices=("reference", "cmd", "measured"), default="reference")
-    ap.add_argument("--max-pos-error", type=float, default=0.02)
-    ap.add_argument("--max-rot-error", type=float, default=0.1)
-    ap.add_argument("--place-dx", type=float, default=0.35)
-    ap.add_argument("--hand-vmax", type=float, default=0.15)
-    ap.add_argument("--torso-vmax", type=float, default=0.08)
-    ap.add_argument("--movej-vmax", type=float, default=0.5)
-    ap.add_argument("--torso-leash", type=float, default=0.0)
-    ap.add_argument("--lambda", dest="qp_lambda", type=float, default=1e-4)
-    ap.add_argument("--adaptive-lambda", type=float, default=0.05)
-    ap.add_argument("--adaptive-lambda-sigma", type=float, default=0.1)
-    ap.add_argument("--print-track", action="store_true")
-    ap.add_argument("--print-period", type=float, default=None)
-    ap.add_argument("--dq-max", type=float, default=2.0)
-    ap.add_argument("--data-record", action="store_true")
-    ap.add_argument("--trace-dir", default=None)
-    ap.add_argument("--debug-input", action="store_true")
-    ap.add_argument("--torso-return-gain", type=float, default=0.0)
+    ap.add_argument("--demo", action="store_true", help="无窗口自检")
+    ap.add_argument("--data-record", action="store_true", help="记录数据")
+    ap.add_argument("--trace-dir", default=None, help="记录目录（同时开启 --data-record）")
+    ap.add_argument("--debug-input", action="store_true", help="打印键盘 / 鼠标事件")
+    ap.add_argument("--config", default=None, help="参数文件（JSON），键为参数名")
+    ap.add_argument("--print-params", action="store_true", help="打印当前生效的全部参数后退出")
+    ap.add_argument("--kp", type=float, default=argparse.SUPPRESS,
+                    help="同时设置 --kp-pos 和 --kp-rot")
+    add_arguments(ap, opt)
     a = ap.parse_args(argv)
-    positive = ("kp", "control_dt", "place_dx", "hand_vmax", "torso_vmax", "movej_vmax",
-                "qp_lambda", "adaptive_lambda_sigma", "dq_max")
-    for name in positive:
-        if not getattr(a, name) > 0:
-            ap.error(f"--{name.replace('_', '-')} needs a value > 0")
-    if min(a.torso_leash, a.adaptive_lambda, a.max_pos_error, a.max_rot_error) < 0:
-        ap.error("--torso-leash / --adaptive-lambda / --max-*-error need a value >= 0")
-    if not 0.0 <= a.torso_return_gain < 1.0:
-        ap.error("--torso-return-gain needs a value in [0, 1)")
-    return a
+
+    if a.config:
+        with open(a.config, encoding="utf-8") as f:
+            apply_dict(opt, json.load(f))
+    apply_arguments(opt, a)
+    if hasattr(a, "kp"):
+        opt.wbc.kp_pos = opt.wbc.kp_rot = a.kp
+
+    w = opt.wbc
+    if opt.solver not in ("hqp", "wqp", "wls"):
+        ap.error("--solver 只能是 hqp / wqp / wls")
+    if opt.command_base not in ("reference", "cmd", "measured"):
+        ap.error("--command-base 只能是 reference / cmd / measured")
+    positive = dict(kp_pos=w.kp_pos, kp_rot=w.kp_rot, lambda_reg=w.lambda_reg, dq_max=w.max_joint_vel,
+                    control_dt=opt.control_dt, place_dx=opt.place_dx, hand_vmax=opt.hand_vmax,
+                    torso_vmax=opt.torso_vmax, movej_vmax=opt.movej_vmax,
+                    adaptive_lambda_sigma=opt.adaptive_lambda_sigma, torso_cost=opt.torso_cost,
+                    arm_cost=opt.arm_cost, hand_weight=opt.hand_weight,
+                    torso_weight=opt.torso_weight)
+    for name, value in positive.items():
+        if not value > 0:
+            ap.error(f"{name} 必须大于 0")
+    if min(opt.torso_leash, opt.adaptive_lambda, w.posture_k, w.limit_w) < 0:
+        ap.error("torso_leash / adaptive_lambda / posture_k / limit_w 不能为负")
+    if not 0.0 <= opt.torso_return_gain < 1.0:
+        ap.error("torso_return_gain 必须在 [0, 1) 内")
+    return a, opt
 
 
 def main(argv=None):
     global g_debug_input
-    a = parse_args(sys.argv[1:] if argv is None else argv)
+    a, opt = parse_args(sys.argv[1:] if argv is None else argv)
     g_debug_input = a.debug_input
-    opt = Options(solver=a.solver, kp=a.kp, command_base=a.command_base, kinematic=a.kinematic,
-                  max_pos_error=a.max_pos_error, max_rot_error=a.max_rot_error,
-                  control_dt=a.control_dt, place_dx=a.place_dx,
-                  hand_vmax=a.hand_vmax, torso_vmax=a.torso_vmax,
-                  torso_return_gain=a.torso_return_gain, dq_max=a.dq_max,
-                  movej_vmax=a.movej_vmax, torso_leash=a.torso_leash, qp_lambda=a.qp_lambda,
-                  adaptive_lambda=a.adaptive_lambda,
-                  adaptive_lambda_sigma=a.adaptive_lambda_sigma,
-                  print_track=a.print_track or a.print_period is not None,
-                  print_period=a.print_period or 0.5)
+    if a.print_params:
+        print(json.dumps(to_dict(opt), indent=2, ensure_ascii=False))
+        return 0
     robot = robots.get_robot(a.robot)
-    model, data, substeps = load_sim(robot, a.control_dt)
+    model, data, substeps = load_sim(robot, opt.control_dt)
     set_initial_posture(robot, model, data)
     ctl = InteractiveController(model, data, substeps, opt, robot, use_base=a.base)
     ctl.initialize()

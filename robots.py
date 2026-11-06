@@ -243,13 +243,13 @@ def r1_interactive_home():
 
     躯干   前三个俯仰关节取 (a, -2a, -a)，a = 30°：微蹲，躯干保持直立（第 3 关节转轴为 -y，
            三者的俯仰正好抵消），上下、前后都留有活动余量；腰部转动为 0
-    手臂   上臂自然下垂、肩部略外展 0.1 rad，肘弯 90°，前臂朝前：双手在胸前，
-           约 (0.47, ±0.28, 1.04) m
+    手臂   上臂自然下垂、肩部略外展 0.2 rad（在限位斥力区之外，否则停下后会被斥力推着飘移），肘弯 90°，前臂朝前：双手在胸前，
+           约 (0.47, ±0.31, 1.05) m
     """
     rm = _r1_names()
     a = np.radians(30.0)
     home = dict(zip(rm.TORSO_JOINTS, [a, -2.0 * a, -a, 0.0]))
-    arm = [0.0, 0.1, 0.0, -np.pi / 2, 0.0, 0.0, 0.0]
+    arm = [0.0, 0.2, 0.0, -np.pi / 2, 0.0, 0.0, 0.0]
     home.update(zip(rm.LEFT_ARM_JOINTS, arm))
     home.update(zip(rm.RIGHT_ARM_JOINTS, arm))
     return home

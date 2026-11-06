@@ -259,6 +259,7 @@ $\mathbf{A}$ 一定可逆：$\mathbf{J}^T\mathbf{W}\mathbf{J}$ 和 $R$ 都半正
 | $\lambda$ | `lambda_reg` | $10^{-4}$ | 全局阻尼 |
 | $\mathbf{W}_p$（关节） | `posture_w` | $2 \times 10^{-3}$ | 关节的分组正则化 |
 | $\mathbf{W}_p$（底盘） | `base_reg_w` | $10^{-4}$ | 底盘的分组正则化 |
+| $\mathbf{W}_p$（单独设置的关节组） | `set_joint_cost(joint_names, w)` | 默认不设 | 覆盖上面两项，如让躯干比手臂贵，躯干就少动 |
 | $k$ | `posture_k` | $2 \times 10^{-3}$ | 中位拉回增益（与 $\mathbf{W}_p$ 独立） |
 | $k_l$ | `limit_w` | 0.5 | 限位斥力强度，距限位 10% 行程内生效 |
 | 关节速度上限 | `max_joint_vel` | 2.0 rad/s | 逐自由度裁剪 |

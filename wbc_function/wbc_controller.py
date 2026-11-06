@@ -41,6 +41,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .config import WBCConfig
 from .kinematics import MujocoKinematics
 from .problem import Task, WBCProblem
 from .tasks import joint_velocity_bounds, quat_error
@@ -163,7 +164,7 @@ class WholeBodyController:
     """
 
     def __init__(self, model, data, joint_names, ee_sites=(), base_free=True,
-                 base_joints=BASE_JOINTS, solver="wls", frames=None, dt=None):
+                 base_joints=BASE_JOINTS, solver="wls", frames=None, dt=None, config=None):
         self.m = model
         self.d = data
         # 控制周期：WQP / HQP 由关节位置限位换算速度上下界时用（QP_WBC.md §5.2）。
@@ -195,34 +196,40 @@ class WholeBodyController:
         self.q_nominal[self.base_mask] = 0.0
         self.posture_mask = ~self.base_mask
 
-        # --- 增益与权重（符号见 QP_WBC.md §1.3.2 引用块、§1.5.1）
+        # --- 增益与权重：默认值和含义见 config.py（符号见 QP_WBC.md §1.3.2 引用块、§1.5.1）。
+        # 这些属性运行中可以随时修改，下一次 step() 生效
         # 目标函数：1/2||J v - xdot_des||^2_W + λ/2||v||^2 + 1/2||v - v_posture||^2_Wp
-        self.Kp_pos = 12.0       # 末端位置比例增益（1/s）
-        self.Kp_rot = 12.0       # 末端姿态比例增益（1/s）
-        self.task_w = np.array([1, 1, 1, 0.4, 0.4, 0.4])  # 位置权重高于姿态
-        self.lambda_reg = 1e-4   # 全局阻尼 λ
-        self.posture_w = 2e-3    # W_p 的关节部分：关节动起来的代价
-        self.base_reg_w = 1e-4   # W_p 的底盘部分：很小，远处目标时底盘乐于移动
-        self.posture_k = 2e-3    # v_posture 中的 k：拉向中位的增益（1/s）
-        self.limit_w = 0.5       # v_posture 中的 k_l：限位斥力强度（距限位 10% 行程内生效）
-        self.max_joint_vel = 2.0  # rad/s
-        self.max_base_vel = 0.6   # m/s，底盘平移
-        self.limit_beta = 0.5    # WQP / HQP 中关节位置限位的缓冲系数（QP_WBC.md §5.2）
+        self.config = cfg = WBCConfig() if config is None else config
+        self.Kp_pos = cfg.kp_pos
+        self.Kp_rot = cfg.kp_rot
+        self.task_w = np.array([cfg.pos_weight] * 3 + [cfg.rot_weight] * 3, float)
+        self.lambda_reg = cfg.lambda_reg
+        self.posture_w = cfg.posture_w     # W_p 的关节部分
+        self.base_reg_w = cfg.base_reg_w   # W_p 的底盘部分
+        self.posture_k = cfg.posture_k     # v_posture 中的 k
+        self.limit_w = cfg.limit_w         # v_posture 中的 k_l
+        self.limit_zone = cfg.limit_zone
+        self.max_joint_vel = cfg.max_joint_vel
+        self.max_base_vel = cfg.max_base_vel
+        self.limit_beta = cfg.limit_beta
         # 坐标系任务的误差限幅（None = 不限）：期望速度 = 前馈 + Kp * clip(误差)。
         # 目标够不到时，误差一直很大，Kp * 误差远超关节速度上限，接近奇异的手臂会在
         # 速度上限之间来回翻转（离散控制的极限环）；限幅后期望速度有界，就不会这样。
         # 正常跟踪（误差小于限幅）不受影响。
-        self.max_pos_error = None  # m
-        self.max_rot_error = None  # rad
+        self.max_pos_error = cfg.max_pos_error  # m
+        self.max_rot_error = cfg.max_rot_error  # rad
 
         if solver == "wls":
             self.solver = WLSSolver(saturation=None)   # 饱和处理在 _saturate 中
         elif solver == "wqp":
-            self.solver = WQPSolver()
+            s = cfg.solver
+            self.solver = WQPSolver(s.preset, s.max_iter, s.max_cputime, s.active_tol)
         elif solver == "hqp":
             # 每层都带正则项（阻尼 + 姿态项）：目标够不到、接近奇异时不抖（QP_WBC.md §8.3 补充）
             # （见 hqp_solver.py 开头）
-            self.solver = HQPSolver(regularization="all")
+            s = cfg.solver
+            self.solver = HQPSolver(s.preset, s.max_iter, s.max_cputime, s.regularization,
+                                    s.eps, s.lock_tol, s.rank_tol, s.active_tol)
         else:
             raise ValueError("solver 只能是 'wls'、'wqp' 或 'hqp'")
         self.solver_kind = solver
@@ -232,6 +239,7 @@ class WholeBodyController:
         self.tasks = {}                       # 名字 -> FrameTask / CustomTask，按注册顺序
         self.constraints = {}                 # 名字 -> 约束函数（见 add_constraint）
         self.frozen = np.zeros(self.n, bool)  # 被冻结的受控自由度
+        self.joint_cost = np.full(self.n, np.nan)  # 单独设置的 W_p，NaN 表示用默认值
         self._warned_uncontrollable = set()   # 已警告过的（任务, 分量），只警告一次
         for site in self.ee_sites:
             self.add_frame_task(site, site=site)
@@ -320,6 +328,18 @@ class WholeBodyController:
         if unknown:
             raise KeyError(f"不是受控关节：{unknown}")
         self.frozen = self.kin.mask(names)
+
+    def set_joint_cost(self, joint_names, w):
+        """给一组受控关节单独设置 W_p（动起来的代价）。w 越大，这组关节越不愿意动；
+        w=None 表示恢复默认（posture_w / base_reg_w）。例如让躯干少动、手臂多动：
+
+            wbc.set_joint_cost(TORSO_JOINTS, 0.05)
+        """
+        names = list(joint_names)
+        unknown = [n for n in names if n not in self.joint_names]
+        if unknown:
+            raise KeyError(f"不是受控关节：{unknown}")
+        self.joint_cost[self.kin.mask(names)] = np.nan if w is None else float(w)
 
     @property
     def frozen_joints(self):
@@ -410,13 +430,13 @@ class WholeBodyController:
 
             v_posture,i = k (q_mid,i - q_i)
                         + k_l [max(0, 1 - (q_i - q_min,i)/m_i) - max(0, 1 - (q_max,i - q_i)/m_i)]
-            m_i = 0.1 (q_max,i - q_min,i)
+            m_i = limit_zone (q_max,i - q_min,i)
 
         k = posture_k，k_l = limit_w。底盘的 k 取 0（它没有偏好的世界位置），
         但仍受限位斥力。
         """
         v = self.posture_k * (self.q_nominal - q) * self.posture_mask
-        margin = 0.1 * (self.upper - self.lower) + 1e-6
+        margin = self.limit_zone * (self.upper - self.lower) + 1e-6
         near_lower = q - self.lower
         near_upper = self.upper - q
         v += self.limit_w * np.where(near_lower < margin,
@@ -546,7 +566,7 @@ class WholeBodyController:
 
     @staticmethod
     def _clip_norm(e, limit):
-        if limit is None:
+        if not limit:                      # None 或 0：不限幅
             return e
         norm = float(np.linalg.norm(e))
         return e if norm <= limit else e * (limit / norm)
@@ -583,8 +603,9 @@ class WholeBodyController:
 
     # ------------------------------------------------------------- 内部
     def _posture_weights(self):
-        """W_p 的对角：底盘 base_reg_w，关节 posture_w。"""
-        return np.where(self.base_mask, self.base_reg_w, self.posture_w)
+        """W_p 的对角：底盘 base_reg_w，关节 posture_w，set_joint_cost 设置过的关节用设置值。"""
+        w = np.where(self.base_mask, self.base_reg_w, self.posture_w)
+        return np.where(np.isnan(self.joint_cost), w, self.joint_cost)
 
     def _saturate(self, qd):
         """WLS 的速度饱和：逐自由度裁剪；底盘平移作为二维向量整体缩放（保持方向）。"""
