@@ -16,10 +16,13 @@ hqp_solver.py —— 分层 QP（HQP，字典序优化）求解器，每层用 q
         高层（不是最后一层）  eps/2 ||v||^2，eps 取本层任务量级的 1e-6，只为保证 H 正定
         最后一层              WBCProblem.regularization()：λ/2||v||^2 + 1/2||v - v_posture||^2_{W_p}
     "all"（带阻尼的分层，实际控制推荐）
-        每一层都加 WBCProblem.regularization()（高层另加 eps）。高层任务接近奇异时，
-        只有 eps 的高层相当于不带阻尼的伪逆：目标够不到时解会在速度上限之间逐周期翻转；
-        每层带上 λ 和姿态项（含限位斥力）后不再翻转。代价是高层任务多了一点由正则项
-        引起的残差（与 WQP 中正则项的影响同量级），优先级仍然成立。
+        高层加权重正则 WBCProblem.regularization(posture=False)：λ/2||v||^2 + 1/2 v^T W_p v
+        （另加 eps），最后一层加完整的 regularization()，含 v_posture。
+        高层任务接近奇异时，只有 eps 的高层相当于不带阻尼的伪逆：目标够不到时解会在
+        速度上限之间逐周期翻转；每层带上 λ + W_p 的阻尼后不再翻转。
+        建议低层加 v_posture、高层不加：v_posture（回中、限位斥力）放在高层，会把高优先级
+        任务拉出残差；权重正则只是阻尼，残差与 WQP 中正则项的影响同量级，优先级仍然成立。
+        限位由每层的硬约束 lb <= v <= ub 保证，高层不需要斥力。
 
 实现要点（与主流 HQP 框架的对应）：
   * 逐层求解、上层任务作为下层的等式约束（OpenSoT iHQP 的做法）；
@@ -78,7 +81,7 @@ class HQPSolver:
     preset      qpOASES 选项："reliable"（稳健，默认）/ "mpc"（快）/ "default"
     max_iter    每层每次求解的最大迭代次数（nWSR）
     max_cputime 每层每次求解的最长时间（秒），None 表示不限
-    regularization  "last"：正则项只放最后一层；"all"：每层都放（见文件开头）
+    regularization  "last"：正则项只放最后一层；"all"：每层都放权重正则，v_posture 只放最后一层（见文件开头）
     eps         高层阻尼的相对大小：eps_k = eps * max(1, 本层 J^T W J 的最大对角元)
     lock_tol    上层锁定的放宽量（速度量纲）：|行 · v - 锁定值| <= lock_tol
     rank_tol    SVD 压缩锁定行时的相对奇异值阈值：比最大奇异值小这么多倍的方向
@@ -185,7 +188,7 @@ class HQPSolver:
         """本层的 (H, g)：本层任务 + 正则项（见文件开头）+ 高层的 eps。"""
         H, g = problem.task_objective(level.tasks)
         if is_last or self.regularization == "all":
-            H_reg, g_reg = problem.regularization()
+            H_reg, g_reg = problem.regularization(posture=is_last)   # v_posture 只放最低层
             H, g = H + H_reg, g + g_reg
         if not is_last:
             info.eps = self.eps * max(1.0, float(np.max(np.diag(H), initial=0.0)))

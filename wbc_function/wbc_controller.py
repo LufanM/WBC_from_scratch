@@ -47,6 +47,8 @@ from .problem import Task, WBCProblem
 from .tasks import joint_velocity_bounds, quat_error
 from .wls_solver import WLSSolver
 from .wqp_solver import WQPSolver
+
+_KEEP = object()   # set_posture 中表示“这一项不改”
 from .hqp_solver import HQPSolver
 
 BASE_JOINTS = ("base_x", "base_y", "base_yaw")
@@ -65,6 +67,8 @@ class FrameTask:
         weight    任务权重 w_i
         priority  所在层（只对 solver="hqp" 有效，数字越小越优先）
         kp_pos / kp_rot   比例增益；None 表示使用控制器的 Kp_pos / Kp_rot
+        rotation  3 x 3 旋转矩阵 R 或 None。给出时分量 components 按 R * (世界坐标系的量) 计算，
+                  即在 R 对应的坐标系下跟踪，例如只跟踪“底盘前方”和“高度”
     """
 
     def __init__(self, name, kind, ref, components, weight, kp_pos, kp_rot,
@@ -72,8 +76,7 @@ class FrameTask:
         self.name = name
         self.kind = kind                  # "site" 或 "body"
         self.ref = ref                    # site / body 名
-        self.components = tuple(components)
-        self.rows = np.array([COMPONENTS.index(c) for c in self.components])
+        self.set_components(components)
         self.weight = float(weight)
         self.priority = int(priority)
         self.kp_pos = kp_pos
@@ -82,6 +85,12 @@ class FrameTask:
         self.target_pos = None
         self.target_quat = None
         self.vel = None                   # 6 维前馈速度 [线速度; 角速度]（世界坐标系）
+        self.rotation = None
+
+    def set_components(self, components):
+        """改变跟踪的分量（见 COMPONENTS），可以在运行中切换。"""
+        self.components = tuple(components)
+        self.rows = np.array([COMPONENTS.index(c) for c in self.components])
 
     def set_target(self, pos=None, quat=None, vel=None):
         """设置目标位姿和前馈速度。
@@ -191,10 +200,9 @@ class WholeBodyController:
         self.base_mask = self.kin.mask(base_set)
         self.base_xy_mask = self.kin.mask(("base_x", "base_y"))
 
-        # 关节中位作为舒适姿态；底盘没有“中位”，不参与拉回
-        self.q_nominal = 0.5 * (self.lower + self.upper)
-        self.q_nominal[self.base_mask] = 0.0
-        self.posture_mask = ~self.base_mask
+        # 姿态项的默认回中目标：关节取限位中位；底盘没有“中位”，取 0 且默认不回中（k = 0）
+        self.q_mid = 0.5 * (self.lower + self.upper)
+        self.q_mid[self.base_mask] = 0.0
 
         # --- 增益与权重：默认值和含义见 config.py（符号见 QP_WBC.md §1.3.2 引用块、§1.5.1）。
         # 这些属性运行中可以随时修改，下一次 step() 生效
@@ -204,10 +212,9 @@ class WholeBodyController:
         self.Kp_rot = cfg.kp_rot
         self.task_w = np.array([cfg.pos_weight] * 3 + [cfg.rot_weight] * 3, float)
         self.lambda_reg = cfg.lambda_reg
-        self.posture_w = cfg.posture_w     # W_p 的关节部分
-        self.base_reg_w = cfg.base_reg_w   # W_p 的底盘部分
+        self.posture_w = cfg.posture_w     # W_p 的默认对角值
         self.posture_k = cfg.posture_k     # v_posture 中的 k
-        self.limit_w = cfg.limit_w         # v_posture 中的 k_l
+        self.posture_kl = cfg.posture_kl   # v_posture 中的 k_l
         self.limit_zone = cfg.limit_zone
         self.max_joint_vel = cfg.max_joint_vel
         self.max_base_vel = cfg.max_base_vel
@@ -239,7 +246,10 @@ class WholeBodyController:
         self.tasks = {}                       # 名字 -> FrameTask / CustomTask，按注册顺序
         self.constraints = {}                 # 名字 -> 约束函数（见 add_constraint）
         self.frozen = np.zeros(self.n, bool)  # 被冻结的受控自由度
-        self.joint_cost = np.full(self.n, np.nan)  # 单独设置的 W_p，NaN 表示用默认值
+        # set_posture 分组设置的姿态项参数，NaN 表示用默认值（q_mid / posture_w / posture_k）
+        self.posture_q = np.full(self.n, np.nan)
+        self.posture_wp = np.full(self.n, np.nan)
+        self.posture_kv = np.full(self.n, np.nan)
         self._warned_uncontrollable = set()   # 已警告过的（任务, 分量），只警告一次
         for site in self.ee_sites:
             self.add_frame_task(site, site=site)
@@ -329,17 +339,27 @@ class WholeBodyController:
             raise KeyError(f"不是受控关节：{unknown}")
         self.frozen = self.kin.mask(names)
 
-    def set_joint_cost(self, joint_names, w):
-        """给一组受控关节单独设置 W_p（动起来的代价）。w 越大，这组关节越不愿意动；
-        w=None 表示恢复默认（posture_w / base_reg_w）。例如让躯干少动、手臂多动：
+    def set_posture(self, joint_names, q=_KEEP, w=_KEEP, k=_KEEP):
+        """分组设置姿态项 1/2||v - v_posture||^2_{W_p} 的参数（QP_WBC.md §1.3.2 引用块）：
 
-            wbc.set_joint_cost(TORSO_JOINTS, 0.05)
+            q  回中目标 q_ref（标量或与 joint_names 等长的数组）
+            w  W_p，动起来的代价：越大这组自由度越不愿意动
+            k  回中增益：v_posture 中拉向 q_ref 的部分为 k (q_ref - q)，0 表示不回中
+
+        不传的项不改；传 None 恢复默认（q：限位中位，底盘 0；w：posture_w；
+        k：posture_k，底盘 0）。例如：
+
+            wbc.set_posture(TORSO_JOINTS, w=0.05)            # 躯干少动，仅权重正则
+            wbc.set_posture(ARM_JOINTS, q=q_home, k=0.5)     # 手臂空闲时拉回 home
         """
         names = list(joint_names)
         unknown = [n for n in names if n not in self.joint_names]
         if unknown:
             raise KeyError(f"不是受控关节：{unknown}")
-        self.joint_cost[self.kin.mask(names)] = np.nan if w is None else float(w)
+        idx = [self.joint_names.index(n) for n in names]
+        for value, store in ((q, self.posture_q), (w, self.posture_wp), (k, self.posture_kv)):
+            if value is not _KEEP:
+                store[idx] = np.nan if value is None else np.asarray(value, float)
 
     @property
     def frozen_joints(self):
@@ -426,22 +446,32 @@ class WholeBodyController:
 
     # ------------------------------------------------------------- 姿态项
     def _posture_velocity(self, q):
-        """姿态速度 v_posture（QP_WBC.md §1.3.2 引用块）：
+        """姿态速度 v_posture（QP_WBC.md §1.3.2 引用块）。
 
-            v_posture,i = k (q_mid,i - q_i)
+        含义：任务管不到的自由度（冗余方向）“希望”以什么速度动。它出现在姿态项
+        1/2 ||v - v_posture||^2_Wp 里，QP 会让 v 在不影响任务的前提下尽量接近它：
+            v_posture = 0      只希望关节少动，姿态项就是纯分组正则化 1/2 v^T W_p v，
+                               不会主动把关节往任何方向推（交互程序默认如此）
+            v_posture != 0     还会主动推关节：拉向 q_ref（回中）、推离限位（斥力）
+
+            v_posture,i = k_i (q_ref,i - q_i)
                         + k_l [max(0, 1 - (q_i - q_min,i)/m_i) - max(0, 1 - (q_max,i - q_i)/m_i)]
             m_i = limit_zone (q_max,i - q_min,i)
 
-        k = posture_k，k_l = limit_w。底盘的 k 取 0（它没有偏好的世界位置），
-        但仍受限位斥力。
+        q_ref 默认限位中位，k_i 默认 posture_k、底盘 0（它没有偏好的世界位置），二者都可以
+        用 set_posture 分组设置；k_l = posture_kl，对所有自由度生效。
+        HQP 中 v_posture 只放最低层，高层只用 W_p 的权重正则（见 hqp_solver.py 开头）。
         """
-        v = self.posture_k * (self.q_nominal - q) * self.posture_mask
+        q_ref = np.where(np.isnan(self.posture_q), self.q_mid, self.posture_q)
+        k = np.where(np.isnan(self.posture_kv),
+                     np.where(self.base_mask, 0.0, self.posture_k), self.posture_kv)
+        v = k * (q_ref - q)
         margin = self.limit_zone * (self.upper - self.lower) + 1e-6
         near_lower = q - self.lower
         near_upper = self.upper - q
-        v += self.limit_w * np.where(near_lower < margin,
+        v += self.posture_kl * np.where(near_lower < margin,
                                      (margin - near_lower) / margin, 0.0)
-        v -= self.limit_w * np.where(near_upper < margin,
+        v -= self.posture_kl * np.where(near_upper < margin,
                                      (margin - near_upper) / margin, 0.0)
         return v
 
@@ -497,7 +527,10 @@ class WholeBodyController:
         if targets is not None:
             self._apply_targets(targets)
         q = self.get_joint_positions()
-        # 姿态项 1/2||v - v_posture||^2_Wp 直接交给 WBCProblem（QP_WBC.md §1.3.2 引用块）
+        # 姿态项 1/2||v - v_posture||^2_Wp 直接交给 WBCProblem（QP_WBC.md §1.3.2 引用块）：
+        #   W_p        每个自由度动起来的代价，决定冗余自由度给谁用（_posture_weights）
+        #   以上两项都可以用 set_posture 按组设置
+        #   v_posture  冗余方向上希望关节动的速度（回中 + 限位斥力）；为 0 时就是纯分组正则化
         problem = WBCProblem(self.n, lambda_reg=self.lambda_reg,
                              wp_diag=self._posture_weights(),
                              v_posture=self._posture_velocity(q))
@@ -549,15 +582,22 @@ class WholeBodyController:
         pos, quat = self.get_frame_pose(task.name)
         e_pos = (task.target_pos - pos) if needs_pos else np.zeros(3)
         e_rot = quat_error(quat, task.target_quat) if needs_rot else np.zeros(3)
-        e = np.concatenate([e_pos, e_rot])        # 报告用真实误差，限幅只作用于期望速度
-        e_pos = self._clip_norm(e_pos, self.max_pos_error)
-        e_rot = self._clip_norm(e_rot, self.max_rot_error)
+        e = np.concatenate([e_pos, e_rot])
+        J6 = self.frame_jacobian(task.name)
+        ff = np.zeros(6) if task.vel is None else task.vel    # 前馈
+        if task.rotation is not None:             # 换到任务指定的坐标系
+            R6 = np.kron(np.eye(2), task.rotation)
+            e, J6, ff = R6 @ e, R6 @ J6, R6 @ ff
+        selected = np.zeros(6, bool)
+        selected[rows] = True
+        tracked = e * selected                    # 不跟踪的分量不参与限幅
+        # 报告用真实误差，限幅只作用于期望速度
+        e_pos = self._clip_norm(tracked[:3], self.max_pos_error)
+        e_rot = self._clip_norm(tracked[3:], self.max_rot_error)
         kp_pos = self.Kp_pos if task.kp_pos is None else task.kp_pos
         kp_rot = self.Kp_rot if task.kp_rot is None else task.kp_rot
-        xdot = np.concatenate([kp_pos * e_pos, kp_rot * e_rot])
-        if task.vel is not None:
-            xdot = xdot + task.vel                # 前馈
-        J = self.frame_jacobian(task.name)[rows]
+        xdot = np.concatenate([kp_pos * e_pos, kp_rot * e_rot]) + ff
+        J = J6[rows]
         self._check_controllable(task.name, rows, J)
         problem.add_task(Task(task.name, J, xdot[rows], task.weight, self.task_w[rows],
                               task.priority))
@@ -603,9 +643,8 @@ class WholeBodyController:
 
     # ------------------------------------------------------------- 内部
     def _posture_weights(self):
-        """W_p 的对角：底盘 base_reg_w，关节 posture_w，set_joint_cost 设置过的关节用设置值。"""
-        w = np.where(self.base_mask, self.base_reg_w, self.posture_w)
-        return np.where(np.isnan(self.joint_cost), w, self.joint_cost)
+        """W_p 的对角：默认 posture_w，set_posture 设置过的自由度用设置值。"""
+        return np.where(np.isnan(self.posture_wp), self.posture_w, self.posture_wp)
 
     def _saturate(self, qd):
         """WLS 的速度饱和：逐自由度裁剪；底盘平移作为二维向量整体缩放（保持方向）。"""

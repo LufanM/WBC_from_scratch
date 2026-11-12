@@ -6,9 +6,11 @@ robots.py —— 机器人配置：让同一套全身控制程序（如 demo_hqp
     怎么得到 MuJoCo 模型    load()，返回 (model, data)
     关节分组                torso / left_arm / right_arm（可选 base）
     末端                    左右末端 site 名（WBC 跟踪的坐标系）
-    躯干坐标系              body 名，以及跟踪哪些分量
-    初始姿态                {关节名: 角度}
-    躯干安全盒（可选）      世界坐标 (x_min, x_max, z_min, z_max)；None 表示以初始躯干位置为中心自动给出
+    躯干坐标系              body 名
+    默认姿态                {关节名: 角度}
+
+应用程序的业务参数（初始姿态、安全盒、目标距离等）不放在这里，由应用自己定义（如
+demo_hqp_interactive.py 的 Options）。
 
 任意 URDF 都可以用 load_urdf() 加载：它在加载时用 MjSpec 补上 WBC 仿真需要、而 URDF 里没有的东西——
 位置执行器（增益按初始姿态下的关节惯量整定）、末端 site、重力补偿、地面和灯光，可选平面底盘
@@ -70,11 +72,8 @@ class RobotConfig:
     right_ee_site: str
     torso_body: str
     home: dict = field(default_factory=dict)
-    base_joints: list = field(default_factory=list)     # 可选的底盘自由度（--base 时参与规划）
-    torso_components: tuple = ("x", "z")                 # 躯干任务跟踪的分量
-    torso_box: tuple | None = None                       # (x_min, x_max, z_min, z_max)，世界坐标
-    torso_box_margin: tuple = (0.15, 0.25, 0.40, 0.10)   # 自动安全盒：初始躯干 x 向后/向前，z 向下/向上
-    stress_hand_dx: float = 0.9                          # B 键压力点：双手在初始位置前方多远（m）
+    base_joints: list = field(default_factory=list)     # 底盘自由度 [x, y, yaw]，没有则为空
+    base_body: str = None                                # 底盘坐标系所在的 body，有底盘时必须给
     gravcomp: bool = True                                # 仿真中开重力补偿（等效于伺服带重力前馈）
 
     def arm_joints(self):
@@ -238,23 +237,6 @@ def _load_r1():
     return load_mjcf(rm.ensure_mjcf())
 
 
-def r1_interactive_home():
-    """R1 交互演示的初始姿态，参照 AlphaBrainSystem mujoco_hqp_interactive 的初始姿态设计：
-
-    躯干   前三个俯仰关节取 (a, -2a, -a)，a = 30°：微蹲，躯干保持直立（第 3 关节转轴为 -y，
-           三者的俯仰正好抵消），上下、前后都留有活动余量；腰部转动为 0
-    手臂   上臂自然下垂、肩部略外展 0.2 rad（在限位斥力区之外，否则停下后会被斥力推着飘移），肘弯 90°，前臂朝前：双手在胸前，
-           约 (0.47, ±0.31, 1.05) m
-    """
-    rm = _r1_names()
-    a = np.radians(30.0)
-    home = dict(zip(rm.TORSO_JOINTS, [a, -2.0 * a, -a, 0.0]))
-    arm = [0.0, 0.2, 0.0, -np.pi / 2, 0.0, 0.0, 0.0]
-    home.update(zip(rm.LEFT_ARM_JOINTS, arm))
-    home.update(zip(rm.RIGHT_ARM_JOINTS, arm))
-    return home
-
-
 def _r1_config(name, load):
     rm = _r1_names()
     return RobotConfig(
@@ -264,8 +246,8 @@ def _r1_config(name, load):
         right_arm_joints=list(rm.RIGHT_ARM_JOINTS),
         base_joints=list(rm.BASE_JOINTS),
         left_ee_site=rm.LEFT_EE_SITE, right_ee_site=rm.RIGHT_EE_SITE,
-        torso_body=rm.TORSO_BODY,
-        home=r1_interactive_home())
+        torso_body=rm.TORSO_BODY, base_body=rm.BASE_BODY,
+        home=dict(rm.HOME_POSE))      # 默认姿态；交互程序的初始姿态见 demo_hqp_interactive.interactive_home
 
 
 def _load_r1_urdf():
@@ -288,7 +270,7 @@ def load_config_file(path):
 
         "urdf": "robot.urdf"（相对 JSON 文件所在目录），
         "ee_sites": {"left_ee": "left_tool_link", "right_ee": ["right_link7", [0, 0, 0.1]]},
-        "planar_base": false
+        "planar_base": false（为 true 时同时给 "base_body": URDF 的根 link）
 
     例：
         {"name": "my_robot", "urdf": "my_robot.urdf",
@@ -307,9 +289,8 @@ def load_config_file(path):
     actuated = cfg["torso_joints"] + cfg["left_arm_joints"] + cfg["right_arm_joints"]
     if planar_base:
         cfg.setdefault("base_joints", ["base_x", "base_y", "base_yaw"])
-    for key in ("torso_components", "torso_box", "torso_box_margin"):
-        if cfg.get(key) is not None:
-            cfg[key] = tuple(cfg[key])
+        if not cfg.get("base_body"):
+            raise ValueError("planar_base 需要给出 base_body（URDF 的根 link）")
     home = cfg.get("home", {})
     return RobotConfig(load=lambda: load_urdf(urdf, actuated, ee_sites, home=home,
                                               planar_base=planar_base,

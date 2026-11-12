@@ -56,7 +56,7 @@
 
 <img src="README_pics/hqp_interactive.webp" width="100%" alt="HQP 交互仿真">
 
-迁移自 AlphaBrainSystem 的 `mujoco_hqp_interactive.cpp`，操作方式、四种控制模式（手 / 躯干的 跟踪 / 自由 / 冻结 组合）、状态机、插值、初始姿态的设计、无窗口自检和数据记录格式都与 C++ 版一致，求解换成本仓库的 `WholeBodyController(solver="hqp")`：躯干安全盒在第 -1 层，双手在第 0 层，躯干在第 1 层。默认机器人是 `assets/` 中原始 URDF 的 R1 Pro，完整说明见 `demo_hqp_interactive.py` 开头。
+迁移自 AlphaBrainSystem 的 `mujoco_hqp_interactive.cpp`，操作方式、前四种控制模式（手 / 躯干的 跟踪 / 自由 / 冻结 组合）、状态机、插值、初始姿态的设计、无窗口自检和数据记录格式都与 C++ 版一致，求解换成本仓库的 `WholeBodyController(solver="hqp")`：躯干安全盒在第 -1 层，双手在第 0 层，躯干在第 1 层，底盘在第 2 层。相比 C++ 版，这里增加了底盘的控制和交互。默认机器人是 `assets/` 中原始 URDF 的 R1 Pro，完整说明见 `demo_hqp_interactive.py` 开头。
 
 视频依次演示（机身 40% 透明，便于看到目标球）：
 
@@ -64,11 +64,12 @@
 2. **拖动躯干**：躯干后移、下降，双手在世界坐标系中保持不动；
 3. **冻结手臂**：只动躯干，双手随身体移动；
 4. **压力测试点**：双手目标远超可达范围，目标球变红，双手尽力靠近，不抖动；
-5. **回到初始姿态**：所有关节在关节空间平滑回位。
+5. **回到初始姿态**：所有关节在关节空间平滑回位；
+6. **拖动底盘**：模式 9 下手臂、躯干冻结，底盘走到新位置并转向。
 
-主要功能：Ctrl + 拖动目标球（可锁定沿 X / Y / Z 轴），数字键切换四种控制模式，双手联动（端托盘）、放置点、压力测试点、回初始姿态、机身透明等快捷键；底盘可选参与规划；可切换为加权 QP / 加权最小二乘对照；无窗口自检（四种模式 + A/B 对照）；记录每个周期的关节和末端数据，用 `tools/plot_trace.py` 画图。
+主要功能：Ctrl + 拖动目标球（可锁定沿 X / Y / Z 轴），数字键切换 9 种控制模式（1~4 底盘不介入，5~9 底盘介入），双手联动（端托盘）、放置点、压力测试点、回初始姿态、机身透明等快捷键；底盘 x、y、yaw 三个自由度也可控，可拖动底盘球设置位置和朝向；有多个跟踪目标时依次设置（拖动或按空格保持不变），设完后一起执行；大球显示目标、小球显示当前，都带姿态坐标系；可切换为加权 QP / 加权最小二乘对照；无窗口自检（四种模式 + A/B 对照）；记录每个周期的关节和末端数据，用 `tools/plot_trace.py` 画图。
 
-**换机器人（适配其他 URDF）**：程序里没有写死任何机器人信息，全部来自 [robots.py](robots.py) 的 `RobotConfig`（关节分组、末端、躯干坐标系、初始姿态、安全盒）。任意 URDF 可以用通用加载器 `robots.load_urdf()` 加载，它在加载时补上执行器（增益按关节惯量整定）、末端 site、重力补偿、地面，可选平面底盘。接入新机器人写一个 JSON 配置即可（格式见 `robots.load_config_file`）；内置的 `r1_urdf` 就是用通用加载器加载同一个 R1 URDF。
+**换机器人（适配其他 URDF）**：程序里没有写死任何机器人信息，全部来自 [robots.py](robots.py) 的 `RobotConfig`（关节分组、末端、躯干坐标系、默认姿态）；初始姿态、安全盒、放置点距离等属于交互程序自己的参数，在 `demo_hqp_interactive.py` 的 `Options` 中设置，可通过命令行或 JSON 配置修改。任意 URDF 可以用通用加载器 `robots.load_urdf()` 加载，它在加载时补上执行器（增益按关节惯量整定）、末端 site、重力补偿、地面，可选平面底盘。接入新机器人写一个 JSON 配置即可（格式见 `robots.load_config_file`）；内置的 `r1_urdf` 就是用通用加载器加载同一个 R1 URDF。
 
 ## 文件说明
 
@@ -95,6 +96,7 @@
 | `wqp_solver.py` | `WQPSolver`：加权 QP，用 qpOASES 求解，支持关节限位、线性（软）约束 |
 | `hqp_solver.py` | `HQPSolver`：分层 QP，按任务 `priority` 逐层求解（每层 qpOASES），软约束可作为单独一层 |
 | `qp_builder.py` | WQP / HQP 共用的 QP 组装（软约束松弛变量、等式块）、结果回读、qpOASES 对象缓存 |
+| `config.py` | `WBCConfig`、`SolverConfig`：控制器和求解器的全部参数及默认值，`WholeBodyController(config=...)` 传入 |
 | `wbc_controller.py` | `WholeBodyController`：全身控制器（应用层），可跟踪末端、躯干、底盘。组合下面的组件，可选 `solver="wls"`（原实现）、`"wqp"` 或 `"hqp"`；`simulate.py`、`demo_*` 都用它 |
 | `problem.py` | 问题描述：`Task`、`LinearConstraint`、`WBCProblem`、`WBCResult`，三个求解器共用 |
 | `tasks.py` | 任务 / 约束构造函数（`pose_task`、`joint_velocity_bounds`、`linearized_constraint` 等），姿态误差等工具 |
@@ -138,6 +140,20 @@
 
 - **直接用组件**：用 `MujocoKinematics` 固定受控自由度的顺序、取限位和雅可比；每个控制周期构造一个 `WBCProblem`，加入任务（末端位姿、关节姿态等）、上下界和线性约束，交给 `WLSSolver` / `WQPSolver` / `HQPSolver` 中的任意一个求解，三者共用同一套问题描述，换求解器只需换一行。
 - **用 `WholeBodyController`（推荐）**：任务是常驻对象，运行时随时修改目标、前馈速度、开关、权重和优先级；可冻结任意一组关节；可注册常驻约束（如躯干安全盒）和自定义任务（如臂角）；每个周期调用一次求解，返回关节速度和各任务的误差。
+
+### HQP 求解框架
+
+<img src="README_pics/hqp_framework.svg" width="100%" alt="wbc_function 的 HQP 求解框架">
+
+每个控制周期分两步：
+
+1. **搭问题**（`WholeBodyController`）：任务、约束、冻结、姿态项在构造时注册，是常驻对象，运行中可以随时改目标、权重和优先级。每个周期 `build_problem` 读当前关节角、算雅可比和期望任务速度、生成速度上下界和线性约束，组装成一个 `WBCProblem`。`WBCProblem` 与求解器无关，WLS、WQP、HQP 都吃同一份。
+2. **分层求解**（`HQPSolver`）：按 `priority` 把任务和软约束分层，从高到低逐层解 QP：
+   - **目标**：本层任务 + 权重正则（λ + W_p，每层都加，起阻尼作用）+ 本层软约束的松弛代价；回中 / 限位斥力（v_posture）只放在最低层，避免拉偏高优先级任务；
+   - **约束**：关节速度上下界和硬约束每层都有；上面各层已经做到的任务被锁定（SVD 压缩成线性无关的行），软约束的违反量固定为上层求得的值；
+   - **结束条件**：锁定后没有剩余自由度时跳过下面的层；低层求解失败时保留上一层的解并标记 degraded，保证高优先级任务和硬约束始终满足。
+
+结果 `WBCResult` 给出关节速度和每一层的状态、残差，积分后作为位置指令发给执行器。
 
 接口与原理的对应、控制器的完整用法见 [QP_WBC.md §11](QP_WBC.md#11-代码结构wbc_function)。QP 求解器第一次使用时会用 g++ 编译一个 qpOASES 桥接库；qpOASES 不在 conda 默认位置时，设置环境变量 `QPOASES_ROOT` 指向其安装前缀（含 `include/qpOASES.hpp` 和 `lib/libqpOASES.so`）。
 
@@ -210,13 +226,12 @@ WQP 在速度饱和时保持运动方向，所以收敛更快。`solver="wls"` �
 ### 待优化项
 
 * ⏳阻尼下增大误差，误差也即纠正比例的计算原理
-* ⏳到达目标后，目标点不动，但身体会飘逸得问题
+* ⏳到达目标后，目标点不动，但身体会飘移的问题
 
 
 
-### MuJoCo 迁移说明
+### MuJoCo 说明
 
-本项目已从 PyBullet 完全迁移到 MuJoCo。主要改进：
 
 1. **雅可比精度**：有限差分校验误差从 $5 \times 10^{-4}$ 降至 $4.6 \times 10^{-7}$
 2. **底盘雅可比**：底盘建模为真实关节，由 MuJoCo 直接给出，不再需要手工推导

@@ -10,6 +10,7 @@ compare      R1 双手固定、躯干目标拉到够不着的地方，左右并�
              （运动学积分，两边的目标、增益完全相同）
 interactive  demo_hqp_interactive.py 的真实界面（隐藏窗口），按脚本依次演示：
              双手前伸（全身协同）→ 拖躯干（双手不动）→ 冻结手臂只动躯干 → 压力点 → 回初始姿态
+             → 模式 9 拖底盘 → 底盘转向
 arm_angle    运行 demo_arm_angle_swivel.py 本身（替换掉它的 viewer），双手固定、臂角在零空间中摆动
 
 需要显示器（GLFW 创建 OpenGL 上下文）。
@@ -60,7 +61,8 @@ def _add_sphere(scene, pos, radius, rgba):
 def record_compare(path=os.path.join(OUT_DIR, "hqp_vs_wqp.webp")):
     import wbc_function as wf
     from robot_model import LEFT_ARM_JOINTS, RIGHT_ARM_JOINTS, TORSO_JOINTS, load_model
-    from robots import r1_interactive_home
+    import robots
+    import demo_hqp_interactive as D
     warnings.simplefilter("ignore")      # 底盘不动时躯干 y 不可控的提示
 
     W, H, FPS, DT = 640, 560, 15, 0.01
@@ -70,7 +72,8 @@ def record_compare(path=os.path.join(OUT_DIR, "hqp_vs_wqp.webp")):
     sims = []
     for solver in ("wqp", "hqp"):
         model, data, _ = load_model()
-        for n, v in r1_interactive_home().items():          # 与交互演示相同的初始姿态
+        home = D.interactive_home(robots.get_robot("r1"), D.Options())
+        for n, v in home.items():                            # 与交互演示相同的初始姿态
             data.qpos[model.joint(n).qposadr[0]] = v
         mujoco.mj_forward(model, data)
         wbc = wf.WholeBodyController(
@@ -150,9 +153,9 @@ def record_interactive(path=os.path.join(OUT_DIR, "hqp_interactive.webp")):
 
     FPS = 10
     robot = robots.get_robot("r1")
-    opt = D.Options()
+    opt = D.Options(mode=1)                  # 从上身协同开始演示，底盘最后才介入
     model, data, substeps = D.load_sim(robot, opt.control_dt)
-    D.set_initial_posture(robot, model, data)
+    D.set_initial_posture(robot, model, data, opt)
     ctl = D.InteractiveController(model, data, substeps, opt, robot)
     ctl.initialize()
     viewer = D.Viewer(ctl)
@@ -170,6 +173,9 @@ def record_interactive(path=os.path.join(OUT_DIR, "hqp_interactive.webp")):
         if a >= 1.0:
             viewer.ctl.commit_drag(part)
             viewer.dragging = -1
+            for _ in D.GROUPS:                  # 其余目标保持不变
+                if ctl.round_dragged:
+                    ctl.skip_group()
             return True
         return False
 
@@ -180,11 +186,17 @@ def record_interactive(path=os.path.join(OUT_DIR, "hqp_interactive.webp")):
         (6.5, lambda t0, now: drag(D.TORSO, [-0.12, 0, 0], False, 1.0, t0, now)),  # 拖躯干后移
         (10.0, lambda t0, now: drag(D.TORSO, [0, 0, -0.15], True, 1.0, t0, now)),  # 拖躯干下降
         (14.0, lambda t0, now: (ctl.request_mode(D.mode_from_number(3)), True)[1]),  # 3：冻结手臂
-        (15.0, lambda t0, now: drag(D.TORSO, [0, 0, 0.12], True, 1.0, t0, now)),   # 只动躯干
-        (19.0, lambda t0, now: (ctl.go_to_stress_point(), True)[1]),          # B：压力点
-        (27.0, lambda t0, now: (ctl.return_home(), True)[1]),                 # R：回初始姿态
+        # 只动躯干：斜着前移、上移（双手随身体移动），幅度大一些便于看清
+        (15.0, lambda t0, now: drag(D.TORSO, [0.20, 0, 0.13], False, 1.5, t0, now)),
+        (23.0, lambda t0, now: (ctl.go_to_stress_point(), True)[1]),          # B：压力点
+        (31.0, lambda t0, now: (ctl.return_home(), True)[1]),                 # R：回初始姿态
+        (37.0, lambda t0, now: (ctl.request_mode(D.mode_from_number(9)), True)[1]),   # 只动底盘
+        (37.5, lambda t0, now: drag(D.BASE, [0.5, 0.4, 0], False, 1.0, t0, now)),  # 拖底盘
+        (48.0, lambda t0, now: (viewer.ctl.drag_base_yaw(0.8),
+                                ctl.commit_base(ctl.parts[D.BASE].seg.goal,
+                                                ctl.parts[D.BASE].ghost_yaw, now), True)[2]),  # 转向
     ]
-    end_time = 33.0
+    end_time = 54.0
 
     frames = []
     state = {"i": 0, "t0": None, "next_frame": 0.0}
@@ -194,22 +206,24 @@ def record_interactive(path=os.path.join(OUT_DIR, "hqp_interactive.webp")):
         orig_render()
         now = ctl.time()
         i = state["i"]
-        if i < len(script) and now >= script[i][0]:
+        if i < len(script) and now >= script[i][0] and not ctl.moving_home():  # 回位时不操作
             if state["t0"] is None:
                 state["t0"] = now
             if script[i][1](state["t0"], now):
                 state["i"], state["t0"] = i + 1, None
-        if now >= state["next_frame"]:
+        if now >= end_time:
+            glfw.set_window_should_close(viewer.window, True)
+
+    def capture():                                   # 交换缓冲区之前读，画面才是确定的
+        if ctl.time() >= state["next_frame"]:
             state["next_frame"] += 1.0 / FPS
             fw, fh = glfw.get_framebuffer_size(viewer.window)
             rgb = np.zeros((fh, fw, 3), np.uint8)
             mujoco.mjr_readPixels(rgb, None, mujoco.MjrRect(0, 0, fw, fh), viewer.con)
-            img = Image.fromarray(np.flipud(rgb))
-            frames.append(img)                       # 保留窗口原始分辨率
-        if now >= end_time:
-            glfw.set_window_should_close(viewer.window, True)
+            frames.append(Image.fromarray(np.flipud(rgb)))   # 保留窗口原始分辨率
 
     viewer.render = render
+    viewer.on_frame = capture
     glfw.init()
     glfw.window_hint(glfw.VISIBLE, glfw.FALSE)                 # 隐藏窗口
     viewer.run(sim_per_frame=1.0 / FPS)      # 每帧固定推进 1/FPS 秒：视频按真实速度播放、不丢帧

@@ -54,10 +54,10 @@ class WBCConfig:
     max_rot_error: float = param(None, "姿态误差限幅 (rad)，不给或 0 表示不限", "任务跟踪")
     # 正则与姿态
     lambda_reg: float = param(1e-4, "全局阻尼 λ", "正则与姿态", flag="--lambda")
-    posture_w: float = param(2e-3, "关节的 W_p（动起来的代价）", "正则与姿态")
-    base_reg_w: float = param(1e-4, "底盘的 W_p", "正则与姿态")
+    posture_w: float = param(2e-3, "W_p：每个自由度动起来的代价，分组设置用 set_posture",
+                             "正则与姿态")
     posture_k: float = param(2e-3, "回中增益 k (1/s)，0 表示不回中", "正则与姿态")
-    limit_w: float = param(0.5, "限位斥力强度 k_l，0 表示不要斥力", "正则与姿态")
+    posture_kl: float = param(0.5, "限位斥力强度 k_l，0 表示不要斥力", "正则与姿态")
     limit_zone: float = param(0.1, "限位斥力区：离限位多少比例的行程内生效", "正则与姿态")
     # 限位
     max_joint_vel: float = param(2.0, "关节速度上限 (rad/s)", "限位", flag="--dq-max")

@@ -111,7 +111,7 @@ class WBCProblem:
     n           受控自由度个数
     lambda_reg  全局阻尼 λ（保证 H 正定、抑制奇异附近的跳变）
     wp_diag     姿态项权重 W_p 的对角：每个自由度动起来的代价（越大越“懒”），默认全 0
-    v_posture   姿态速度 v_posture（拉向中位、推离限位），默认全 0
+    v_posture   姿态速度：冗余方向上希望关节动的速度（如拉向中位、推离限位），默认全 0
 
     姿态项 1/2 ||v - v_posture||^2_{W_p} 见 QP_WBC.md §1.3.2 引用块。
     v_posture = 0 时它退化为正文的分组正则化 1/2 v^T R v（R = W_p）。
@@ -160,13 +160,16 @@ class WBCProblem:
         self.ub[mask] = 0.0
 
     # --- 目标函数 --------------------------------------------------------------
-    def regularization(self):
+    def regularization(self, posture=True):
         """正则化部分 λ/2||v||^2 + 1/2||v - v_posture||^2_{W_p} 的 (H, g)。
 
-        HQP 只把它放在最低层（QP_WBC.md §8.3）；WLS / WQP 通过 objective() 使用。
+        posture=False 时取 v_posture = 0，只剩权重正则 λ/2||v||^2 + 1/2 v^T W_p v。
+        建议低层加 v_posture、高层不加：v_posture 会把 v 往回中 / 斥力方向拉，放在高层
+        会让高优先级任务产生残差；只用权重正则则只起阻尼作用。HQP 按此处理
+        （hqp_solver.py 开头）；WLS / WQP 只有一层，通过 objective() 使用完整形式。
         """
         H = self.lambda_reg * np.eye(self.n) + np.diag(self.wp_diag)
-        g = -self.wp_diag * self.v_posture
+        g = -self.wp_diag * self.v_posture if posture else np.zeros(self.n)
         return H, g
 
     def task_objective(self, tasks=None):

@@ -33,7 +33,7 @@ $$
 | $\dot{q}_{\max}$（底盘平移） | `max_base_vel` | 0.6 m/s | 底盘 $x$、$y$ 各自限制为 $0.6/\sqrt{2}$（内接正方形近似圆形限制） |
 | $dt$ | 构造参数 `dt` | 模型仿真步长 | **必须等于实际控制周期**。填小了，限位附近允许的速度会偏大 |
 
-没有限位的关节（如 `base_yaw`）默认范围是 $\pm\pi$，所以 WQP / HQP 下底盘转不过 $\pm\pi$。
+没有限位的关节（如 `base_yaw`）视为不限（范围取得很大），底盘可以连续转过 $\pm\pi$。
 
 ### 1.3 冻结
 
@@ -78,7 +78,7 @@ $$
 
 下面这些容易被当成约束，其实不是：
 
-- **限位斥力**（`limit_w`）：只是姿态项里的一个偏好，任务需要时可以压过它。不越限靠的是 1.2 节的上下界；
+- **限位斥力**（`posture_kl`）：只是姿态项里的一个偏好，任务需要时可以压过它。不越限靠的是 1.2 节的上下界；
 - **任务误差限幅**（`max_pos_error`、`max_rot_error`）：限制的是期望速度，不是位姿；
 - **自碰撞**：目前没有作为约束加入控制器，需要时按 1.4 节线性化后加入。
 
@@ -86,17 +86,17 @@ $$
 
 两者都不是约束，都属于姿态速度 $\mathbf{v}_{\text{posture}}$，只在冗余方向上起作用，优先级低于任务（公式见 [QP_WBC.md §1.3.2](QP_WBC.md#132-正则项与阻尼)）。
 
-| | 限位斥力 `limit_w` | 回中 `posture_k` |
+| | 限位斥力 `posture_kl` | 回中 `posture_k` |
 |---|---|---|
-| 作用 | 关节进入离限位 10% 行程的区域后往回推 | 把关节一直拉向 `q_nominal` |
-| 什么时候生效 | 只在限位区内 | 只要没到 `q_nominal` 就生效 |
-| 目标不动时 | 推出限位区后就停 | **不会停**，一直走到 `q_nominal` |
+| 作用 | 关节进入离限位 `limit_zone`（默认 10%）行程的区域后往回推 | 把关节一直拉向回中目标 $q_{\text{ref}}$ |
+| 什么时候生效 | 只在限位区内 | 只要没到 $q_{\text{ref}}$ 就生效 |
+| 目标不动时 | 推出限位区后就停 | **不会停**，一直走到 $q_{\text{ref}}$ |
 | 解决的问题 | 关节顶到限位后丢掉冗余；手臂伸直时肘关节卡在奇异位形 | 长时间运行后构型慢慢走偏 |
 | 不解决的问题 | 不保证不越限，那是上下界的事（WLS 没有上下界，靠求解后裁剪） | 不决定“谁来动”，那是 $\mathbf{W}_p$ 的事 |
 
 **限位斥力：默认开着。** 它只在限位附近起作用，平时不影响运动。下面的情况要注意：
 
-- 需要在限位区内长时间保持姿态时，它会把关节往外推，表现为停下后飘移。这时要么让初始姿态和常用姿态避开限位区，要么减小 `limit_w`；
+- 需要在限位区内长时间保持姿态时，它会把关节往外推，表现为停下后飘移。尤其是手被锁住时，关节推不出限位区，斥力会一直让其他关节在冗余方向上慢慢转。这时要么让常用姿态避开限位区，要么减小或关掉 `posture_kl`；
 - 手臂要伸到接近极限时不要关：它能把肘关节推离伸直位，和阻尼一起防止抖动（[QP_WBC.md §8.3 补充](QP_WBC.md#83-正则项放在哪一层)）；
 - 用 `solver="wls"` 时不要关：WLS 求解时不考虑限位，斥力是求解前唯一提前避开限位的手段。
 
@@ -111,7 +111,8 @@ $$
 
 开回中时注意：
 
-- **把 `q_nominal` 改成有意义的姿态。** 默认是行程中位，而中位不一定好：手臂的行程中位接近伸直奇异。通常应设为初始姿态（`wbc.q_nominal[:] = q_home`）；
+- **把 $q_{\text{ref}}$ 改成有意义的姿态。** 默认是行程中位，而中位不一定好：手臂的行程中位接近伸直奇异。通常应设为初始姿态（`wbc.set_posture(names, q=q_home)`）；
+- **可以只给部分关节开。** `wbc.set_posture(names, k=...)` 按组设置增益，例如只让手臂回中、躯干不回中（`k=0`）；
 - **$k$ 取小值。** 时间常数是 $1/k$，$k$ 太大时冗余方向的运动会一直很明显；
 - **目标不动时也会动。** 这不是 bug，是回中的定义。
 
@@ -124,7 +125,7 @@ $$
 | 斥力关、回中关 | 验证纯 $R$ 形式（$\mathbf{v}_{\text{posture}} = 0$），或要求绝对不动 |
 | 斥力关、回中开 | 一般不用 |
 
-代码默认值注意：`WholeBodyController` 的 `posture_k` 默认是 $2 \times 10^{-3}$（回中是开着的），交互程序 `demo_hqp_interactive.py` 默认是 0。
+代码默认值注意：`WholeBodyController` 的 `posture_k` 默认是 $2 \times 10^{-3}$、`posture_kl` 默认是 0.5；交互程序 `demo_hqp_interactive.py` 只留限位斥力（`posture_kl` = 0.5），关掉回中（`posture_k` = 0）：交互时目标不动就该静止，回中会让身体一直慢慢挪；斥力只在离限位 10% 行程内起作用，推出这一区域就停，而且 HQP 中它只在最低层，不会拉偏手和躯干的任务。
 
 ### 1.9 交互仿真里的约束
 
@@ -132,10 +133,11 @@ $$
 
 | 约束 | 设置 | 默认值 |
 |---|---|---|
-| 躯干安全盒（$x$、$z$） | `RobotConfig.torso_box`；不给时以初始躯干位置为中心，由 `torso_box_margin` 给出 | 向后 0.15、向前 0.25、向下 0.40、向上 0.10 m |
+| 躯干安全盒（**底盘坐标系**下的 $x$、$z$） | `torso_box`；不给时以初始躯干位置为中心，由 `torso_box_margin` 给出 | 向后 0.15、向前 0.25、向下 0.40、向上 0.10 m |
 | 安全盒的层 | 第 -1 层，软约束，$\beta = 0.5$ | 在双手之上 |
-| 拖动目标的范围 | 目标夹到安全盒内，留余量 `TORSO_MARGIN` | 5 mm |
-| 指令领先量 | 参考构型最多领先实测 `CMD_LEAD_MAX` | 0.05 rad |
+| 安全盒与底盘 | 底盘坐标系下的躯干位置只取决于躯干关节，雅可比中底盘的列为 0，所以底盘怎么走都不受安全盒影响 | — |
+| 拖动目标的范围 | 目标夹到安全盒内，留余量 `torso_margin` | 5 mm |
+| 指令领先量 | 参考构型最多领先实测 `cmd_lead_max` | 0.05 rad |
 
 ## 2. 怎么传参数
 
@@ -184,13 +186,20 @@ wbc = wf.WholeBodyController(model, data, joints, sites, solver="hqp", config=cf
 | 参数 | 选项 | 默认值 | 含义 |
 |---|---|---|---|
 | `lambda_reg` | `--lambda` | $10^{-4}$ | 全局阻尼 $\lambda$ |
-| `posture_w` | `--posture-w` | $2 \times 10^{-3}$ | 关节的 $\mathbf{W}_p$（动起来的代价） |
-| `base_reg_w` | `--base-reg-w` | $10^{-4}$ | 底盘的 $\mathbf{W}_p$ |
+| `posture_w` | `--posture-w` | $2 \times 10^{-3}$ | $\mathbf{W}_p$：每个自由度（底盘和关节）动起来的代价 |
 | `posture_k` | `--posture-k` | $2 \times 10^{-3}$；交互程序 0 | 回中增益 (1/s)，0 表示不回中（1.8 节） |
-| `limit_w` | `--limit-w` | 0.5 | 限位斥力强度，0 表示不要斥力（1.8 节） |
+| `posture_kl` | `--posture-kl` | 0.5 | 限位斥力强度，0 表示不要斥力（1.8 节） |
 | `limit_zone` | `--limit-zone` | 0.1 | 斥力区：离限位多少比例的行程内生效 |
 
-另有 `wbc.set_joint_cost(joint_names, w)`：单独设置一组关节的 $\mathbf{W}_p$，覆盖上面的 `posture_w`、`base_reg_w`。
+另有 `wbc.set_posture(joint_names, q=..., w=..., k=...)`：按组设置姿态项 $\frac12\|\mathbf{v}-\mathbf{v}_{\text{posture}}\|^2_{\mathbf{W}_p}$ 的三个参数，覆盖上面的默认值（底盘也一样，传底盘关节名）。不传的项不改，传 `None` 恢复默认。
+
+| 参数 | 含义 | 默认 |
+|---|---|---|
+| `q` | 回中目标 $q_{\text{ref}}$ | 关节取行程中位，底盘取 0 |
+| `w` | $\mathbf{W}_p$，动起来的代价 | `posture_w` |
+| `k` | 回中增益，0 表示不回中 | `posture_k`，底盘 0 |
+
+$\mathbf{v}_{\text{posture}} = 0$（所有 `k` 和 `posture_kl` 为 0）时姿态项就是纯权重正则 $\frac12\mathbf{v}^T\mathbf{W}_p\mathbf{v}$。HQP 中 $\mathbf{v}_{\text{posture}}$ 只放最低层，高层只用权重正则：建议低层加 $\mathbf{v}_{\text{posture}}$、高层不加，否则回中和斥力会把高优先级任务拉出残差。
 
 ### 3.3 限位（`WBCConfig`）
 
@@ -236,12 +245,21 @@ wbc = wf.WholeBodyController(model, data, joints, sites, solver="hqp", config=cf
 |---|---|---|---|
 | `hand_priority` | `--hand-priority` | 0 | 双手任务所在层 |
 | `torso_priority` | `--torso-priority` | 1 | 躯干任务所在层 |
+| `base_priority` | `--base-priority` | 2 | 底盘任务所在层 |
 | `box_priority` | `--box-priority` | -1 | 安全盒（软约束）所在层 |
 | `hand_weight` | `--hand-weight` | 1 | 手的任务权重 |
 | `torso_weight` | `--torso-weight` | 1 | 躯干的任务权重 |
 | `arm_cost` | `--arm-cost` | $2 \times 10^{-3}$ | 手臂关节的 $\mathbf{W}_p$，所有模式生效 |
-| `torso_cost` | `--torso-cost` | 0.2 | 躯干关节的 $\mathbf{W}_p$，只在模式 1 生效 |
-| `torso_return_gain` | `--torso-return-gain` | 0 | 模式 1 下躯干回初始位置的增益（每周期纠正比例） |
+| `torso_cost` | `--torso-cost` | 0.2 | 躯干自由（模式 1、5、7）时躯干关节的 $\mathbf{W}_p$ |
+| `torso_return_gain` | `--torso-return-gain` | 0 | 躯干自由时回初始位置的增益（每周期纠正比例） |
+
+**底盘**
+
+| 参数 | 选项 | 默认值 | 含义 |
+|---|---|---|---|
+| `base_weight` | `--base-weight` | 1 | 底盘的任务权重 |
+| `base_cost` | `--base-cost` | 0.3 | 底盘自由（模式 5、6）时的 $\mathbf{W}_p$，越大底盘越不愿意动 |
+| `base_vmax`、`base_wmax` | `--base-vmax`、`--base-wmax` | 0.3、0.5 | 底盘目标的最大线速度 (m/s)、角速度 (rad/s) |
 
 **奇异处理**
 
@@ -257,8 +275,8 @@ wbc = wf.WholeBodyController(model, data, joints, sites, solver="hqp", config=cf
 | `box_soft` | `--box-soft` / `--no-box-soft` | 软约束 | 用软约束还是硬约束 |
 | `box_beta` | `--box-beta` | 0.5 | 缓冲系数 $\beta$ |
 | `box_w_lin`、`box_w_quad` | `--box-w-lin`、`--box-w-quad` | $10^3$、10 | 软约束的罚权重 |
-| `torso_box` | `--torso-box X_MIN X_MAX Z_MIN Z_MAX` | 用机器人配置 | 世界坐标的安全盒 |
-| `torso_box_margin` | `--torso-box-margin 后 前 下 上` | 用机器人配置 | 以初始躯干位置为中心的安全盒 |
+| `torso_box` | `--torso-box X_MIN X_MAX Z_MIN Z_MAX` | 不给（自动） | 底盘坐标系下的安全盒 |
+| `torso_box_margin` | `--torso-box-margin 后 前 下 上` | 0.15 0.25 0.40 0.10 | 以初始躯干位置为中心的安全盒 |
 | `torso_margin` | `--torso-margin` | 0.005 | 拖动目标离盒子边界的余量 (m) |
 | `torso_leash` | `--torso-leash` | 0 | 躯干目标最多领先实测多少 (m)，0 表示不限 |
 
@@ -267,10 +285,12 @@ wbc = wf.WholeBodyController(model, data, joints, sites, solver="hqp", config=cf
 | 参数 | 选项 | 默认值 | 含义 |
 |---|---|---|---|
 | `solver` | `--solver` | `hqp` | `hqp`、`wqp`、`wls` |
+| `mode` | `--mode` | 5 | 启动时的控制模式，1~9（见 4.4 节） |
 | `control_dt` | `--control-dt` | 0.01 | 控制周期 (s)，必须是物理步长的整数倍 |
 | `command_base` | `--command-base` | `reference` | WBC 的计算构型：`reference`、`cmd`、`measured` |
 | `cmd_lead_max` | `--cmd-lead-max` | 0.05 | 指令最多领先实测多少 (rad) |
 | `kinematic` | `--kinematic` | 关 | 关节直接等于指令，不经过物理仿真 |
+| `servo_ff` | `--servo-ff` / `--no-servo-ff` | 开 | 伺服速度前馈：发给执行器的指令领先 (kv/kp)·指令速度，抵消位置伺服的跟踪滞后 |
 
 **目标插值与显示**
 
@@ -281,9 +301,17 @@ wbc = wf.WholeBodyController(model, data, joints, sites, solver="hqp", config=cf
 | `t_min` | `--t-min` | 1.0 | 一段插值的最短时长 (s) |
 | `movej_vmax` | `--movej-vmax` | 0.5 | R 键 moveJ 的峰值关节速度 (rad/s) |
 | `place_dx` | `--place-dx` | 0.35 | P 键放置点的前向距离 (m) |
-| `stress_hand_dx` | `--stress-hand-dx` | 用机器人配置 | B 键压力点的前向距离 (m) |
+| `stress_hand_dx` | `--stress-hand-dx` | 0.9 | B 键压力点的前向距离 (m) |
+| `torso_components` | `--torso-components` | x z | 底盘冻结时躯干任务跟踪的分量（底盘不冻结时另加 y） |
 | `unreachable_error` | `--unreachable-error` | 0.02 | 误差超过它持续 1 s 判为不可达 (m) |
 | `print_track`、`print_period` | `--print-track`、`--print-period` | 关、0.5 | 周期打印跟踪情况 |
+
+**初始姿态**（R1 使用；其他机器人用其配置里的 `home`）
+
+| 参数 | 选项 | 默认值 | 含义 |
+|---|---|---|---|
+| `home_torso_squat` | `--home-torso-squat` | 0.524（30°） | 躯干微蹲角 $a$ (rad)：前三个俯仰关节取 $(a, -2a, -a)$，躯干保持直立 |
+| `home_arm` | `--home-arm` ×7 | 0 0.2 0 −1.571 0 0 0 | 双臂 7 个关节的初始角 (rad)，左右相同。肩部 joint2 要在限位斥力区（约 0.16 rad）之外，否则静止时会被斥力推着动 |
 
 ## 4. 怎么调
 
@@ -294,7 +322,7 @@ wbc = wf.WholeBodyController(model, data, joints, sites, solver="hqp", config=cf
 3. **定 `components`**：只写真正关心的分量，多写的分量会占用下层的自由度。
 4. **调 $K_p$**：从小往大加，出现振荡就退回。要满足 $K_p\,dt \ll 1$。运动目标要给前馈，否则滞后 $v/K_p$。
 5. **调谁来动**：关节代价，见 4.3 节。
-6. **调目标够不到时的表现**：误差限幅和自适应阻尼，见 4.4 节。
+6. **调目标够不到时的表现**：误差限幅和自适应阻尼，见 4.5 节。
 7. **最后才动求解器参数**，一般不需要。
 
 ### 4.2 谁优先
@@ -316,17 +344,60 @@ wbc = wf.WholeBodyController(model, data, joints, sites, solver="hqp", config=cf
 
 | 想要的效果 | 调什么 |
 |---|---|
-| 模式 1 下躯干少动、手臂多动 | 调大 `torso_cost`，或调小 `arm_cost` |
-| 模式 1 下躯干多动、手臂少动 | 调小 `torso_cost`，或调大 `arm_cost` |
-| 底盘少动 | 调大 `base_reg_w` |
-| 某组关节少动 | `set_joint_cost` |
+| 躯干自由时少动、手臂多动 | 调大 `torso_cost`，或调小 `arm_cost` |
+| 躯干自由时多动、手臂少动 | 调小 `torso_cost`，或调大 `arm_cost` |
+| 底盘自由时少动 | 调大 `base_cost`（控制器直接用时 `set_posture(底盘关节, w=...)`） |
+| 某组关节少动 | `set_posture(names, w=...)` |
 | 某组关节严格后动 | 放到更低的层，或冻结。代价只能按比例分担，不是开关 |
 
 建议只调 `torso_cost`，从默认值起每次改 5 倍。比值相同时结果接近。
 
-$\mathbf{W}_p$ 太大时高层任务的残差也会变大（`regularization="all"` 时每层都带这一项），所以只想减少某组关节的运动时，优先用 `set_joint_cost`，不要整体加大 `posture_w`。
+$\mathbf{W}_p$ 太大时高层任务的残差也会变大（`regularization="all"` 时每层都带这一项），所以只想减少某组关节的运动时，优先用 `set_posture(names, w=...)`，不要整体加大 `posture_w`。
 
-### 4.4 目标够不到、接近奇异
+### 4.4 控制模式
+
+手、躯干、底盘的状态组合起来情况太多，交互程序只开放 9 种，用数字键切换，启动默认模式 5。
+
+| 模式 | 手 | 躯干 | 底盘 | 适用场景 |
+|---|---|---|---|---|
+| 1 | track | free | frozen | 上身协同送手 |
+| 2 | track | track | frozen | 手和躯干都有目标 |
+| 3 | frozen | track | frozen | 只动躯干，手随身体移动 |
+| 4 | track | frozen | frozen | 只动手臂 |
+| 5 | track | free | free | 躯干、底盘都帮手，够得最远（启动默认） |
+| 6 | track | track | free | 手和躯干都有目标，底盘帮忙 |
+| 7 | track | free | track | 手和底盘都有目标，躯干帮忙 |
+| 8 | track | track | track | 三者都有目标，手 > 躯干 > 底盘 |
+| 9 | frozen | frozen | track | 只动底盘，整机开着走 |
+
+躯干和底盘都跟踪（模式 8）时，手的目标又在世界坐标系里，低优先级的任务很容易完成不了。只需要手和底盘时优先用模式 7。
+
+三种状态的含义：`frozen` 是 $lb = ub = 0$，不动；`free` 没有任务，由代价（`torso_cost`、`base_cost`）决定帮多少，到位后不再动；`track` 跟踪目标。
+
+拖一个不在 track 的球时，模式自动切换，不会跳出这 9 种；拖本来就在 track 的球，模式不变：
+
+| 当前模式 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
+|---|---|---|---|---|---|---|---|---|---|
+| 拖手 | 1 | 2 | 1 | 4 | 5 | 6 | 7 | 8 | 5 |
+| 拖躯干 | 2 | 2 | 3 | 2 | 6 | 6 | 8 | 8 | 8 |
+| 拖底盘 | 7 | 7 | 9 | 7 | 7 | 7 | 7 | 8 | 9 |
+| 按 P（身体自由帮手） | 1 | 1 | 1 | 4 | 5 | 5 | 5 | 5 | 5 |
+
+**设置多个目标**：模式 2、6、7、8 有多个 track，按手 → 躯干 → 底盘依次设置，每一组拖动目标，或按空格保持不变。全部设完后一起出发、同时到达；设完之前机器人不动。HUD 提示下一个要设的部分，对应的球放大，按 C 放弃本轮。只有一个 track 的模式，松开鼠标就执行。
+
+**底盘目标**：Ctrl+拖动底盘球改 $x$、$y$；按住 Z 左右拖动（或 Ctrl+Shift）改朝向 yaw。
+
+**模式 7、8 里拖底盘时手臂为什么动**：手的目标在世界坐标系里，底盘一走，手臂关节只能反向补偿才能保持手不动，走到手臂够不着就停，这是分层的正确行为。想把整机开走，用模式 9：手臂、躯干都冻结，只动底盘。
+
+要让底盘优先于手，把 `base_priority` 调到比 `hand_priority` 小。
+
+**显示**：只画目标和当前，不画插值过程。大球是目标，带目标姿态坐标系（x 红、y 绿、z 蓝）；小球是当前实际位置，带当前姿态坐标系。躯干只跟踪位置，没有目标姿态；不在 track 的部分没有目标球。
+
+**躯干任务在底盘坐标系下**：跟踪的是“底盘前方”和“高度”，所以底盘转到任何朝向，躯干的行为都一样。
+
+**躯干的 y（侧向）**：躯干关节动不了这个方向，只能靠底盘横移，所以只有底盘没冻结且躯干跟踪时（模式 6、8）才能拖动和跟踪；这时安全盒只限制拖动目标的 z，$x$、$y$ 能到多远取决于底盘。切回底盘冻结的模式时，躯干目标重新锚定到当前位置。模式 8 里躯干优先于底盘，躯干的 y 目标会让底盘目标让步。
+
+### 4.5 目标够不到、接近奇异
 
 | 参数 | 调的方向 | 代价 |
 |---|---|---|
@@ -343,10 +414,11 @@ $\mathbf{W}_p$ 太大时高层任务的残差也会变大（`regularization="all
 
 | 现象 | 可能原因 | 怎么调 |
 |---|---|---|
-| 模式 1 下躯干动得太多 | 躯干力臂长，代价相同时抢着动 | 调大 `torso_cost` |
+| 模式 1、5、7 下躯干动得太多 | 躯干力臂长，代价相同时抢着动 | 调大 `torso_cost` |
 | 调任务权重没反应 | 手和躯干不在同一层，或两个任务不冲突 | 见 4.2 节 |
-| 手够不到时全身抖动 | 高层接近奇异，期望速度远超限位 | 见 4.4 节 |
-| 停下后关节还在慢慢飘 | 回中一直在走，或关节在限位区内被斥力推 | 见 1.8 节 |
+| 手够不到时全身抖动 | 高层接近奇异，期望速度远超限位 | 见 4.5 节 |
+| 停下后关节还在慢慢飘 | 回中一直在走，或关节在限位区内被斥力推 | 见 1.8 节；交互程序默认两者都关 |
+| 运动过程中手跟不上、到位后误差为 0 | 位置伺服有跟踪滞后（约 (kv/kp)·速度） | 打开 `servo_ff`（默认开），或调小 `hand_vmax` |
 | 低优先级任务不动 | 上层用完了自由度，`LevelInfo.status` 为 `skipped` 或 `n_locked` 接近自由度数 | 减少上层的 `components` |
 | 低优先级任务残差大 | 自由度够，但被限位或安全盒卡住 | 看 `active_bounds`，放宽约束或换姿态 |
 | 高优先级任务残差不为 0 | 目标够不到或被卡住；残差很小时可能是正则项的影响 | 看该层 `residual` 和 `active_bounds`；减小 `posture_w` |
@@ -356,4 +428,6 @@ $\mathbf{W}_p$ 太大时高层任务的残差也会变大（`regularization="all
 | 靠近限位时过冲 | `dt` 比实际控制周期小 | 传入正确的 `dt`，调小 `limit_beta` |
 | 本周期失败（`ok=False`） | 硬线性约束不可行 | 改成软约束放到最高层 |
 | `status` 为 `degraded` | 某个低层求解失败，输出的是上一层的解 | 看 `levels` 哪层失败；`max_iterations` 时调大 `max_iter` |
-| 底盘转不过 $\pm\pi$ | `base_yaw` 默认范围是 $\pm\pi$ | 目前的已知限制 |
+| 底盘走一小段就停，HUD 显示不可达 | 手留在世界坐标系里，底盘优先级最低 | 用模式 9，或者手也给新目标 |
+| 拖了球机器人不动 | 模式有多个 track，还没设完 | 看 HUD 提示，继续拖动或按空格 |
+| 底盘自由时动得太多或太少 | 代价比例不合适 | 调 `base_cost` |

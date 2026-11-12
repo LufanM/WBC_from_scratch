@@ -16,10 +16,10 @@ class MujocoKinematics:
 
     model, data    MuJoCo 的 MjModel、MjData
     joint_names    受控关节名（必须是单自由度的 hinge / slide 关节）
-    default_range  没有限位的关节（如 base_yaw）使用的范围 [-r, r]
+    default_range  没有限位的关节（如 base_yaw）使用的范围 [-r, r]，默认很大，相当于不限
     """
 
-    def __init__(self, model, data, joint_names, default_range=np.pi):
+    def __init__(self, model, data, joint_names, default_range=1e3):
         import mujoco
         self._mj = mujoco
         self.m, self.d = model, data

@@ -12,6 +12,10 @@ test_wbc_function.py — checks for the wbc_function package.
    constraints as a level, dependent locks, controller with priorities.
 7. Robot configs: generic URDF loader == R1 converter, JSON config,
    demo_hqp_interactive self-check on R1.
+8. Parameters: WBCConfig defaults, config reaching the solver, command
+   line / config file precedence.
+9. Interactive modes: drag state machine stays in the eight modes, each mode
+   solves and only moves what it should.
 
 Run:  python3 test_wbc_function.py
 """
@@ -168,7 +172,7 @@ def test_controller_closed_form():
     xdot = np.concatenate([wbc.Kp_pos * (target_pos - pos0),
                            wbc.Kp_rot * wf.quat_error(quat0, target_quat)])
     W = np.diag(wbc.task_w)
-    Wp = np.diag(np.where(wbc.base_mask, wbc.base_reg_w, wbc.posture_w))
+    Wp = np.diag(np.full(wbc.n, wbc.posture_w))
     A = J_raw.T @ W @ J_raw + wbc.lambda_reg * np.eye(wbc.n) + Wp
     b = J_raw.T @ W @ xdot + Wp @ wbc._posture_velocity(q)
     v_ref = np.linalg.solve(A, b)
@@ -605,9 +609,248 @@ def test_hqp():
           f"|xdot| {np.linalg.norm(xdot[:3]):.3f} m/s = Kp * 0.02")
 
 
+def test_modes():
+    print("[9] interactive modes: the nine modes and the drag state machine")
+    import contextlib, io
+    import robots
+    import demo_hqp_interactive as D
+
+    # every (mode, drag event) stays inside the eight modes; base stays frozen unless the base is dragged
+    closed = all(ev(m) in D.MODES.values() for m in D.MODES.values()
+                 for ev in (D.on_hand_target_event, D.on_torso_target_event, D.on_base_target_event))
+    check(closed and len(set(D.MODES.values())) == 9, "drag events never leave the nine modes")
+    check(D.Options().mode == 5 and D.MODES[7] == D.ControlMode(D.HAND_TRACK, D.TORSO_FREE, D.BASE_TRACK)
+          and D.mode_number(D.on_base_target_event(D.MODES[5])) == 7,
+          "default mode 5; mode 7 = hands track, torso free, base track; dragging the base enters it")
+    stays = all(D.on_hand_target_event(D.MODES[n]).base == D.BASE_FROZEN
+                and D.on_torso_target_event(D.MODES[n]).base == D.BASE_FROZEN for n in (1, 2, 3, 4))
+    check(stays, "dragging hands or torso in modes 1~4 does not bring the base in")
+
+    def build(mode):
+        robot = robots.get_robot("r1")
+        # kinematic: joints equal the command, so "frozen" can be checked exactly
+        # (under dynamics the servos deflect slightly from the reaction of the moving parts)
+        opt = D.Options(mode=mode, kinematic=True)
+        m, d, sub = D.load_sim(robot, opt.control_dt)
+        D.set_initial_posture(robot, m, d)
+        c = D.InteractiveController(m, d, sub, opt, robot)
+        c.initialize()
+        return c
+
+    moved = {}
+    for n in D.MODES:
+        with contextlib.redirect_stdout(io.StringIO()):
+            c = build(n)
+            q0 = c.read_q()
+            base0 = c.base_pose()[0]
+            if D.MODES[n].hands == D.HAND_TRACK:      # stay in this mode: move the targets directly
+                dx = np.array([0.5, 0.0, 0.0])
+                c.commit_hands(c.home(D.LEFT) + dx, c.parts[D.LEFT].seg.ori_goal,
+                               c.home(D.RIGHT) + dx, c.parts[D.RIGHT].seg.ori_goal, c.time())
+            elif D.MODES[n].base == D.BASE_TRACK:
+                c.commit_base(c.home(D.BASE) + [0.3, 0.0, 0.0], 0.3, c.time())
+            else:
+                c.commit_torso(c.home(D.TORSO) + [0.0, 0.0, -0.05], c.time())
+            end = c.time() + c.remaining_motion() + 1.0
+            while c.time() < end:
+                c.step()
+        q = c.read_q() - q0
+        names = c.joints
+        idx = lambda group: [names.index(j) for j in group]
+        moved[n] = tuple(float(np.abs(q[idx(g)]).max()) for g in
+                         (c.robot.base_joints, c.robot.torso_joints, c.robot.arm_joints()))
+        ok = c.fails == 0 and c.mode == D.MODES[n]
+        base, torso, arm = moved[n]
+        m = D.MODES[n]
+        # frozen parts do not move at all; free parts help; the part with a new target moves
+        for value, state, frozen, free in ((base, m.base, D.BASE_FROZEN, D.BASE_FREE),
+                                           (torso, m.torso, D.TORSO_FROZEN, D.TORSO_FREE),
+                                           (arm, m.hands, D.HAND_FROZEN, None)):
+            ok = ok and (value < 1e-9 if state == frozen else True)
+            ok = ok and (value > 1e-3 if state == free else True)
+        ok = ok and (arm > 1e-3 if m.hands == D.HAND_TRACK else True)
+        ok = ok and (base > 1e-3 if n == 9 else True) and (torso > 1e-3 if n == 3 else True)
+        check(ok, f"mode {n} solves, frozen parts stay and others move: "
+                  f"base {base:.3f} torso {torso:.3f} arms {arm:.3f}")
+
+
+def test_target_round():
+    print("[10] interactive modes: setting several targets in one round")
+    import contextlib, io
+    import robots
+    import demo_hqp_interactive as D
+
+    robot = robots.get_robot("r1")
+    opt = D.Options(mode=8)
+    m, d, sub = D.load_sim(robot, opt.control_dt)
+    D.set_initial_posture(robot, m, d)
+    with contextlib.redirect_stdout(io.StringIO()):
+        c = D.InteractiveController(m, d, sub, opt, robot)
+        c.initialize()
+        hand0, torso0, base0 = c.home(D.LEFT).copy(), c.home(D.TORSO).copy(), c.home(D.BASE).copy()
+
+        order = [c.round_next()]
+        c.begin_drag(D.LEFT)
+        c.drag_to(D.LEFT, hand0 + [0.1, 0.0, 0.0])
+        c.commit_drag(D.LEFT)
+        pending = np.allclose(c.parts[D.LEFT].seg.goal, hand0) and c.parts[D.LEFT].seg.duration == 0.0
+        order.append(c.round_next())
+        c.skip_group()                          # torso: keep
+        order.append(c.round_next())
+        c.begin_drag(D.BASE)
+        c.drag_to(D.BASE, base0 + [0.1, 0.05, 0.0])
+        c.drag_base_yaw(0.2)
+        c.commit_drag(D.BASE)
+        seg = c.parts
+    check(order == ["hands", "torso", "base"] and pending,
+          "modes with several TRACK: targets are set one by one and nothing moves before the last")
+    check(seg[D.LEFT].seg.duration == seg[D.RIGHT].seg.duration == seg[D.BASE].seg.duration > 0
+          and np.allclose(seg[D.TORSO].seg.goal, torso0) and c.round_next() == "hands"
+          and D.mode_number(c.mode) == 8,
+          "after the last target all go together; a skipped target keeps its goal; mode unchanged")
+
+    opt = D.Options(mode=9)
+    m, d, sub = D.load_sim(robot, opt.control_dt)
+    D.set_initial_posture(robot, m, d)
+    with contextlib.redirect_stdout(io.StringIO()):
+        c = D.InteractiveController(m, d, sub, opt, robot)
+        c.initialize()
+        c.begin_drag(D.BASE)
+        c.drag_base_yaw(0.5)
+        c.commit_drag(D.BASE)
+    check(c.parts[D.BASE].seg.duration > 0 and abs(c.parts[D.BASE].goal_yaw - 0.5) < 1e-12
+          and np.allclose(c.parts[D.BASE].seg.goal, c.home(D.BASE)),
+          "single TRACK: release executes; base yaw target set, position unchanged")
+
+
+def test_torso_lateral():
+    print("[11] torso y: only when the base is not frozen")
+    import contextlib, io
+    import robots
+    import demo_hqp_interactive as D
+
+    def run(mode):
+        robot = robots.get_robot("r1")
+        opt = D.Options(mode=mode)
+        m, d, sub = D.load_sim(robot, opt.control_dt)
+        D.set_initial_posture(robot, m, d)
+        with contextlib.redirect_stdout(io.StringIO()):
+            c = D.InteractiveController(m, d, sub, opt, robot)
+            c.initialize()
+            t0 = c.measured(D.TORSO).copy()
+            c.begin_drag(D.TORSO)
+            c.drag_to(D.TORSO, t0 + [0.0, 0.2, 0.0])
+            sent = c.ghost(D.TORSO).copy()
+            c.commit_drag(D.TORSO)
+            while c.round_next() is not None and c.round_dragged:
+                c.skip_group()
+            end = c.time() + c.remaining_motion() + 2.0
+            peak = 0.0
+            while c.time() < end:
+                c.step()
+                peak = max(peak, c.errors[D.LEFT])
+        return c, t0, sent, peak
+
+    c, t0, sent, _ = run(3)
+    check(abs(sent[1] - t0[1]) < 1e-9, "base frozen (mode 3): torso y target is not open")
+    c, t0, sent, peak = run(6)
+    check(abs(sent[1] - t0[1] - 0.2) < 1e-9 and abs(c.measured(D.TORSO)[1] - t0[1] - 0.2) < 2e-3
+          and peak < 5e-3 and c.fails == 0,
+          f"mode 6: torso y reached by the free base "
+          f"(base y {c.base_pose()[0][1]:.3f} m), hands stay within {peak * 1000:.2f} mm")
+    with contextlib.redirect_stdout(io.StringIO()):
+        c.request_mode(D.mode_from_number(2))     # base frozen again: nothing to chase
+        for _ in range(100):
+            c.step()
+    check(c.errors[D.TORSO] < 2e-3 and D.mode_number(c.mode) == 2,
+          "back to a frozen base: torso target re-anchored")
+
+
+def test_posture():
+    print("[12] posture term: set_posture (q / w / k by group), v_posture only at the lowest HQP level")
+    from robot_model import TORSO_JOINTS, RIGHT_ARM_JOINTS
+    from wbc_function.hqp_solver import Level, LevelInfo
+    model, data, joints, base = _setup_robot()
+    wbc = wf.WholeBodyController(model, data, joints, "right_ee", solver="hqp")
+    q = wbc.get_joint_positions()
+    arm = [joints.index(n) for n in RIGHT_ARM_JOINTS]
+    torso = [joints.index(n) for n in TORSO_JOINTS]
+    base_i = [joints.index(n) for n in base]
+
+    v0 = wbc._posture_velocity(q)
+    wbc.posture_kl = 0.0
+    wbc.set_posture(RIGHT_ARM_JOINTS, q=q[arm] + 0.1, k=0.5)
+    wbc.set_posture(TORSO_JOINTS, w=0.05, k=0.0)
+    v = wbc._posture_velocity(q)
+    wp = wbc._posture_weights()
+    check(np.allclose(v[arm], 0.05) and np.allclose(v[torso], 0.0) and np.allclose(v[base_i], 0.0),
+          "q / k by group: arm pulled to its q_ref, torso k = 0, base default k = 0")
+    check(np.allclose(wp[torso], 0.05) and np.allclose(np.delete(wp, torso), wbc.posture_w),
+          "w by group: torso W_p set, others keep posture_w")
+    wbc.set_posture(RIGHT_ARM_JOINTS, q=None)
+    check(np.allclose(wbc._posture_velocity(q)[arm], 0.5 * (wbc.q_mid[arm] - q[arm])),
+          "q=None restores the default (mid of the range); k is kept")
+    wbc.set_posture(joints, q=None, w=None, k=None)
+    wbc.posture_kl = wbc.config.posture_kl
+    check(np.allclose(wbc._posture_velocity(q), v0), "all None: back to the defaults")
+
+    wbc.set_posture(RIGHT_ARM_JOINTS, k=0.5, q=q[arm] + 0.1)
+    pos0, quat0 = wbc.get_ee_pose()
+    prob, _ = wbc.build_problem({"right_ee": (pos0 + [0.05, 0.0, 0.0], quat0)})
+    hqp = wf.HQPSolver(regularization="all")
+    task = prob.tasks[0]
+    Ht, gt = prob.task_objective([task])
+    lam = prob.lambda_reg * np.eye(prob.n) + np.diag(prob.wp_diag)
+    info = LevelInfo(0)
+    H, g = hqp._objective(prob, Level(0, [task], []), False, info)
+    check(np.allclose(g, gt) and np.allclose(H, Ht + lam + info.eps * np.eye(prob.n)),
+          "upper level: weight regularization only (lambda I + W_p), no v_posture")
+    H, g = hqp._objective(prob, Level(0, [task], []), True, LevelInfo(0))
+    check(np.allclose(g, gt - prob.wp_diag * prob.v_posture) and np.abs(prob.v_posture).max() > 0,
+          "lowest level: full posture term with v_posture")
+
+
+def test_config():
+    print("[8] parameters: WBCConfig / SolverConfig, command line, config file")
+    import json, tempfile, os
+    import demo_hqp_interactive as demo
+    model, data, joints, _ = _setup_robot()
+
+    # defaults reproduce the previous hard-coded controller
+    wbc = wf.WholeBodyController(model, data, joints, "right_ee")
+    check(wbc.Kp_pos == 12.0 and wbc.posture_k == 2e-3 and wbc.posture_kl == 0.5
+          and np.allclose(wbc.task_w, [1, 1, 1, 0.4, 0.4, 0.4]) and wbc.max_pos_error is None,
+          "default WBCConfig == previous controller defaults")
+
+    # config reaches the controller and the solver
+    cfg = wf.WBCConfig(kp_pos=20.0, rot_weight=0.2, limit_zone=0.05)
+    cfg.solver.eps, cfg.solver.max_iter, cfg.solver.regularization = 1e-5, 200, "last"
+    wbc = wf.WholeBodyController(model, data, joints, "right_ee", solver="hqp", config=cfg)
+    check(wbc.Kp_pos == 20.0 and wbc.task_w[3] == 0.2 and wbc.limit_zone == 0.05
+          and wbc.solver.eps == 1e-5 and wbc.solver.regularization == "last"
+          and wbc.solver._qp.max_iter == 200,
+          "WBCConfig reaches controller and HQPSolver")
+
+    # command line > config file > defaults; unknown names are rejected
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump({"kp_pos": 20, "torso_cost": 1.0, "wbc": {"solver": {"max_iter": 50}}}, f)
+    try:
+        _, opt = demo.parse_args(["--config", f.name, "--kp-pos", "30", "--eps", "1e-5"])
+    finally:
+        os.remove(f.name)
+    check(opt.wbc.kp_pos == 30 and opt.torso_cost == 1.0 and opt.wbc.solver.max_iter == 50
+          and opt.wbc.solver.eps == 1e-5 and opt.wbc.posture_k == 0.0,
+          "command line overrides config file, file overrides defaults")
+    try:
+        demo.parse_args(["--config", "/dev/null", "--no-such-param", "1"])
+        check(False, "unknown parameter should be rejected")
+    except SystemExit:
+        check(True, "unknown parameter is rejected")
+
+
 def test_robots():
     print("[7] robot configs: generic URDF loader, JSON config, interactive demo on R1")
-    import contextlib, io, json, os, tempfile
+    import contextlib, io, json, os, re, tempfile
     import robots
     import demo_hqp_interactive as demo
 
@@ -632,7 +875,7 @@ def test_robots():
            "right_arm_joints": rm.RIGHT_ARM_JOINTS,
            "ee_sites": {"left_ee": "left_gripper_center", "right_ee": "right_gripper_center"},
            "left_ee_site": "left_ee", "right_ee_site": "right_ee",
-           "torso_body": rm.TORSO_BODY, "home": rm.HOME_POSE}
+           "torso_body": rm.TORSO_BODY, "base_body": rm.BASE_BODY, "home": rm.HOME_POSE}
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
         json.dump(cfg, f)
     try:
@@ -651,6 +894,14 @@ def test_robots():
     b_line = next(l for l in text.splitlines() if l.startswith("B "))
     b_err = float(b_line.split("末端剩余误差 ")[1].split(" mm")[0])
     check(ret == 0 and b_err < 1.0, f"demo_hqp_interactive --demo on R1: exit {ret}, B {b_err:.4f} mm")
+    print("        " + "\n        ".join(l for l in text.splitlines() if l[:2] in ("E ", "F ", "G ", "H ")))
+    nums = lambda head: [float(x) for x in re.findall(r"-?\d+\.\d+", next(
+        l for l in text.splitlines() if l.startswith(head)))]
+    e, f, g, h = (nums(x) for x in ("E ", "F ", "G ", "H "))
+    check(e[-2] < 0.5 and e[-1] < 5.0, "mode 8: base (lowest level) yields, hands stay")
+    check(abs(f[-2] - 5.0) < 2e-3, "base yaw goes past +/-pi")
+    check(g[-2] < 1.0 and g[-1] < 5.0, "after base yaw 90 deg, torso still tracks forward / height")
+    check(h[-2] < 1.0 and h[-1] > 1.0, "free base helps the hands reach further")
 
 
 if __name__ == "__main__":
@@ -664,6 +915,11 @@ if __name__ == "__main__":
     test_closed_loop()
     test_hqp()
     test_robots()
+    test_config()
+    test_modes()
+    test_target_round()
+    test_torso_lateral()
+    test_posture()
     print()
     if FAILS:
         print(f"{len(FAILS)} check(s) failed")
