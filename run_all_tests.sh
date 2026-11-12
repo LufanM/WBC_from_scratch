@@ -8,7 +8,7 @@ echo
 
 # 1. 模型转换
 echo "1️⃣  测试 URDF → MJCF 转换..."
-python3 convert_urdf.py 2>&1 | grep -v "duplicate name" | tail -3
+python3 tools/convert_urdf.py 2>&1 | grep -v "duplicate name" | tail -3
 echo "   ✅ 模型转换完成"
 echo
 
@@ -30,12 +30,18 @@ timeout 300 python3 test_dual_arm_ground.py --headless 2>&1 | tail -6 | grep -E 
 echo "   ✅ 双臂任务通过"
 echo
 
-# 5. 雅可比验证
-echo "5️⃣  验证雅可比精度..."
+# 5. wbc_function（WLS / WQP 封装）
+echo "5️⃣  测试 wbc_function（WLS / WQP）..."
+timeout 600 python3 test_wbc_function.py 2>&1 | tail -1
+echo "   ✅ wbc_function 通过"
+echo
+
+# 6. 雅可比验证
+echo "6️⃣  验证雅可比精度..."
 python3 -c "
 import mujoco, numpy as np
 from robot_model import *
-from wbc_controller import WholeBodyController
+from wbc_function import WholeBodyController
 
 m, d, _ = load_model(0)
 for n, v in HOME_POSE.items():
@@ -51,9 +57,9 @@ print(f'状态: {\"✅ OK\" if err < 1e-3 else \"❌ FAIL\"}')
 "
 echo
 
-# 6. 文件完整性
-echo "6️⃣  检查文件完整性..."
-FILES="convert_urdf.py wbc_controller.py robot_model.py simulate.py test_dual_arm_ground.py README.md MIGRATION_REPORT.md"
+# 7. 文件完整性
+echo "7️⃣  检查文件完整性..."
+FILES="wbc_function/wls_solver.py wbc_function/wqp_solver.py wbc_function/wbc_controller.py robot_model.py simulate.py test_wbc_function.py test_dual_arm_ground.py tools/convert_urdf.py README.md WBC_PRINCIPLES.md QP_WBC.md"
 for f in $FILES; do
     if [ -f "$f" ]; then
         echo "   ✅ $f"
@@ -63,8 +69,8 @@ for f in $FILES; do
 done
 echo
 
-# 7. 依赖检查
-echo "7️⃣  检查依赖..."
+# 8. 依赖检查
+echo "8️⃣  检查依赖..."
 python3 -c "import mujoco; print(f'   ✅ mujoco {mujoco.__version__}')"
 python3 -c "import numpy; print(f'   ✅ numpy {numpy.__version__}')"
 echo

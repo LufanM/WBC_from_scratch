@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 assets/videos/
+wbc_function/_build/
+
+# demo_hqp_interactive.py --data-record 的记录
+hqp_sim_trace/

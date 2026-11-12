@@ -13,7 +13,7 @@ import numpy as np
 import mujoco
 import mujoco.viewer
 from robot_model import load_model, HOME_POSE
-from wbc_controller import WholeBodyController
+from wbc_function import WholeBodyController
 import sys
 
 
@@ -141,10 +141,8 @@ def scenario_1_elbow_only():
     try:
         while viewer.is_running():
             # 1. WBC计算双手主任务
-            qd_main, err_list, _ = wbc.compute(
-                [left_pos, right_pos],
-                [left_quat, right_quat]
-            )
+            qd_main, _ = wbc.compute({"left_ee": (left_pos, left_quat),
+                                      "right_ee": (right_pos, right_quat)})
 
             # 2. 计算双手雅可比（12x14，因为只有14个关节）
             J_left = wbc.site_jacobian(0)  # 6x14
@@ -381,10 +379,8 @@ def scenario_2_elbow_and_base():
     try:
         while viewer.is_running():
             # 1. WBC计算双手主任务
-            qd_main, err_list, _ = wbc.compute(
-                [left_pos, right_pos],
-                [left_quat, right_quat]
-            )
+            qd_main, _ = wbc.compute({"left_ee": (left_pos, left_quat),
+                                      "right_ee": (right_pos, right_quat)})
 
             # 2. 计算双手雅可比（12x21）
             J_left = wbc.site_jacobian(0)

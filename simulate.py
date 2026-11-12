@@ -9,6 +9,7 @@ Run:
     python simulate.py                 # interactive viewer
     python simulate.py --headless      # no window (CI / verification)
     python simulate.py --target 10.9 -0.3 1.1
+    python simulate.py --headless --solver wqp   # weighted QP (qpOASES)
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ import mujoco
 
 from robot_model import (RIGHT_ARM_JOINTS, TORSO_JOINTS, BASE_JOINTS,
                          load_model, add_marker, HOME_POSE)
-from wbc_controller import WholeBodyController, quat_error, rpy_to_quat
+from wbc_function import WholeBodyController, quat_error, rpy_to_quat
 
 CONTROLLED = BASE_JOINTS + TORSO_JOINTS + RIGHT_ARM_JOINTS
 EE_SITE = "right_ee"
@@ -42,6 +43,9 @@ def main():
     ap.add_argument("--steps", type=int, default=3000)
     ap.add_argument("--no-base", action="store_true",
                     help="disable mobile-base planning (torso+arm only)")
+    ap.add_argument("--solver", choices=("wls", "wqp"), default="wls",
+                    help="wls: weighted least squares (original); "
+                         "wqp: weighted QP with hard joint limits (qpOASES)")
     ap.add_argument("--dynamic", action="store_true",
                     help="drive MuJoCo velocity actuators instead of "
                          "integrating kinematically (kinematic is default and "
@@ -51,7 +55,7 @@ def main():
     gui = not args.headless
     model, data, markers = load_model(n_markers=1)
     wbc = WholeBodyController(model, data, CONTROLLED, EE_SITE,
-                             base_free=not args.no_base)
+                             base_free=not args.no_base, solver=args.solver)
 
     # Start from the home posture (arms folded in front, torso upright).
     for name, val in HOME_POSE.items():
@@ -107,7 +111,8 @@ def main():
 
     try:
         for step in range(args.steps):
-            qd, ep, ea = wbc.compute(target_pos, target_quat)
+            qd, err = wbc.compute({EE_SITE: (target_pos, target_quat)})
+            ep, ea = err[EE_SITE]
 
             if args.dynamic:
                 # Integrate the planned velocity into a position setpoint and

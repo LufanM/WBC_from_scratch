@@ -9,7 +9,7 @@ import numpy as np
 import mujoco
 import mujoco.viewer
 from robot_model import load_model, HOME_POSE
-from wbc_controller import WholeBodyController
+from wbc_function import WholeBodyController
 
 
 def demo_nullspace_with_real_robot():
@@ -92,7 +92,7 @@ def demo_nullspace_with_real_robot():
     try:
         while viewer.is_running():
             # 1. WBC计算主任务速度
-            qd_main, err_pos, err_ang = wbc.compute(target_pos, target_quat)
+            qd_main, _ = wbc.compute({"right_ee": (target_pos, target_quat)})
 
             # 2. 计算雅可比矩阵
             J = wbc.site_jacobian(0)  # 6x11

@@ -25,7 +25,7 @@ import numpy as np
 import mujoco
 import mujoco.viewer
 from robot_model import load_model
-from wbc_controller import WholeBodyController
+from wbc_function import WholeBodyController
 
 V_WORLD = np.array([0.0, 0.0, -1.0])  # 参考方向：重力方向
 
@@ -100,7 +100,8 @@ def compute_Jc_fd(m, d, qadr, shoulder_body_pos_fn, elbow_body_id, wrist_site_id
     return Jc_fd, psi0
 
 
-def main():
+def main(show_psi_vectors=False):
+    """show_psi_vectors：在画面中画出臂角的几何量（见下方说明），命令行用 --show-psi 打开。"""
     print("=" * 70)
     print("标准臂角(swivel angle psi)零空间控制演示")
     print("=" * 70)
@@ -241,10 +242,8 @@ def main():
     psi_freq = 0.5
     omega = 2 * np.pi * psi_freq
 
-    # 是否在viewer里画出 l_hat（参考方向, 蓝色箭头）和 p（肘部径向投影, 绿色
-    # 箭头）两个向量，两者之间的夹角就是 psi。设为 False 可关闭，只留末端
-    # 目标点渲染。
-    show_psi_vectors = False
+    # show_psi_vectors：是否在viewer里画出 l_hat（参考方向, 蓝色箭头）和 p（肘部
+    # 径向投影）两个向量，两者之间的夹角就是 psi。为 False 时只渲染末端目标点。
     vec_scale = 0.25   # 向量可视化长度（米），几何量本身很短，放大方便看
     vec_width = 0.0025  # 箭头杆粗细（米），细一点避免遮挡机械臂
 
@@ -279,8 +278,8 @@ def main():
 
     try:
         while viewer.is_running():
-            qd_main, _, _ = wbc.compute([left_pos, right_pos],
-                                         [left_quat, right_quat])
+            qd_main, _ = wbc.compute({"left_ee": (left_pos, left_quat),
+                                      "right_ee": (right_pos, right_quat)})
 
             J_left = wbc.site_jacobian(0)
             J_right = wbc.site_jacobian(1)
@@ -420,4 +419,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    main(show_psi_vectors="--show-psi" in sys.argv)

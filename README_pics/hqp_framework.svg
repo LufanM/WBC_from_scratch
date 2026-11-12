@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="975" viewBox="0 0 1200 975">
+<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#57606a"/></marker></defs>
+<rect x="0" y="0" width="1200" height="975" rx="0" fill="#ffffff" stroke="#ffffff" stroke-width="1.5"/>
+<text x="600.0" y="40" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="22" fill="#1f2328" font-weight="bold" text-anchor="middle">wbc_function：一个控制周期里，HQP 问题怎么搭、怎么解</text>
+<rect x="15" y="62" width="1170" height="352" rx="14" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
+<text x="35" y="92" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="16" fill="#1f2328" font-weight="bold" text-anchor="start">① 搭问题：WholeBodyController</text>
+<text x="300" y="92" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="13" fill="#57606a" font-weight="normal" text-anchor="start">（构造时注册常驻的任务和约束，每个周期只更新目标，再组装成 WBCProblem）</text>
+<rect x="30" y="110" width="320" height="290" rx="10" fill="#e8f0fe" stroke="#1f6feb" stroke-width="1.5"/>
+<text x="45" y="134" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="14" fill="#1f2328" font-weight="bold" text-anchor="start">构造时设置（常驻，运行中可改）</text>
+<text x="45" y="160" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="12.5" fill="#0b3d91" font-weight="normal" text-anchor="start">add_frame_task(name, site, priority)</text>
+<text x="45" y="176" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12" fill="#57606a" font-weight="normal" text-anchor="start">末端 / 躯干 / 底盘的位姿任务，可只取部分分量</text>
+<text x="45" y="198" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="12.5" fill="#0b3d91" font-weight="normal" text-anchor="start">add_task(name, fn, priority)</text>
+<text x="45" y="214" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12" fill="#57606a" font-weight="normal" text-anchor="start">自定义任务，如臂角</text>
+<text x="45" y="236" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="12.5" fill="#0b3d91" font-weight="normal" text-anchor="start">add_constraint(name, fn)</text>
+<text x="45" y="252" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12" fill="#57606a" font-weight="normal" text-anchor="start">线性约束 A v ∈ [lb, ub]，可设为软约束并带 priority</text>
+<text x="45" y="274" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="12.5" fill="#0b3d91" font-weight="normal" text-anchor="start">set_frozen(names)</text>
+<text x="45" y="290" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12" fill="#57606a" font-weight="normal" text-anchor="start">冻结一组自由度：lb = ub = 0</text>
+<text x="45" y="312" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="12.5" fill="#0b3d91" font-weight="normal" text-anchor="start">set_posture(names, q, w, k)</text>
+<text x="45" y="328" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12" fill="#57606a" font-weight="normal" text-anchor="start">姿态项按组设置：回中目标、W_p、回中增益</text>
+<text x="45" y="350" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="12.5" fill="#0b3d91" font-weight="normal" text-anchor="start">WBCConfig / SolverConfig</text>
+<text x="45" y="366" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12" fill="#57606a" font-weight="normal" text-anchor="start">增益、限幅、正则、速度上限、求解器参数</text>
+<rect x="390" y="110" width="320" height="290" rx="10" fill="#ffffff" stroke="#8c959f" stroke-width="1.5"/>
+<text x="405" y="134" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="14" fill="#1f2328" font-weight="bold" text-anchor="start">build_problem(targets)：每个周期</text>
+<text x="405" y="160" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="12.5" fill="#0b3d91" font-weight="normal" text-anchor="start">MujocoKinematics</text>
+<text x="405" y="176" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12" fill="#57606a" font-weight="normal" text-anchor="start">读当前 q，算各任务的雅可比 J</text>
+<text x="405" y="206" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="12.5" fill="#0b3d91" font-weight="normal" text-anchor="start">ẋ_d = 前馈 + Kp·clip(e)</text>
+<text x="405" y="222" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12" fill="#57606a" font-weight="normal" text-anchor="start">期望任务速度，误差限幅防奇异抖动</text>
+<text x="405" y="252" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="12.5" fill="#0b3d91" font-weight="normal" text-anchor="start">lb ≤ v ≤ ub</text>
+<text x="405" y="268" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12" fill="#57606a" font-weight="normal" text-anchor="start">关节位置限位（缓冲 β）+ 速度上限 + 冻结</text>
+<text x="405" y="298" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="12.5" fill="#0b3d91" font-weight="normal" text-anchor="start">constraint fn(q) → A, lb, ub</text>
+<text x="405" y="314" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12" fill="#57606a" font-weight="normal" text-anchor="start">调用常驻约束函数，得到本周期的线性约束</text>
+<text x="405" y="344" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="12.5" fill="#0b3d91" font-weight="normal" text-anchor="start">W_p, v_posture</text>
+<text x="405" y="360" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12" fill="#57606a" font-weight="normal" text-anchor="start">姿态项：W_p 定谁来动；v_posture = 回中 + 限位斥力</text>
+<rect x="750" y="110" width="420" height="290" rx="10" fill="#f3e8ff" stroke="#8957e5" stroke-width="1.5"/>
+<text x="765" y="134" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="14" fill="#1f2328" font-weight="bold" text-anchor="start">WBCProblem：与求解器无关的问题描述</text>
+<rect x="765" y="150" width="390" height="34" rx="6" fill="#ffffff" stroke="#c8b3ef" stroke-width="1"/>
+<text x="777" y="172" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="12.5" fill="#6e40c9" font-weight="normal" text-anchor="start">tasks</text>
+<text x="880" y="172" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="12.5" fill="#1f2328" font-weight="normal" text-anchor="start">Task(J, ẋ_d, W, weight, priority)</text>
+<rect x="765" y="190" width="390" height="34" rx="6" fill="#ffffff" stroke="#c8b3ef" stroke-width="1"/>
+<text x="777" y="212" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="12.5" fill="#6e40c9" font-weight="normal" text-anchor="start">lb, ub</text>
+<text x="880" y="212" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12.5" fill="#1f2328" font-weight="normal" text-anchor="start">每个自由度的速度上下界</text>
+<rect x="765" y="230" width="390" height="34" rx="6" fill="#ffffff" stroke="#c8b3ef" stroke-width="1"/>
+<text x="777" y="252" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="12.5" fill="#6e40c9" font-weight="normal" text-anchor="start">constraints</text>
+<text x="880" y="252" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12.5" fill="#1f2328" font-weight="normal" text-anchor="start">A v ∈ [lb, ub]，是否软约束，priority</text>
+<rect x="765" y="270" width="390" height="34" rx="6" fill="#ffffff" stroke="#c8b3ef" stroke-width="1"/>
+<text x="777" y="292" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="12.5" fill="#6e40c9" font-weight="normal" text-anchor="start">lambda_reg</text>
+<text x="880" y="292" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12.5" fill="#1f2328" font-weight="normal" text-anchor="start">全局阻尼 λ</text>
+<rect x="765" y="310" width="390" height="34" rx="6" fill="#ffffff" stroke="#c8b3ef" stroke-width="1"/>
+<text x="777" y="332" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="12.5" fill="#6e40c9" font-weight="normal" text-anchor="start">wp_diag</text>
+<text x="880" y="332" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12.5" fill="#1f2328" font-weight="normal" text-anchor="start">W_p 的对角</text>
+<rect x="765" y="350" width="390" height="34" rx="6" fill="#ffffff" stroke="#c8b3ef" stroke-width="1"/>
+<text x="777" y="372" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="12.5" fill="#6e40c9" font-weight="normal" text-anchor="start">v_posture</text>
+<text x="880" y="372" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12.5" fill="#1f2328" font-weight="normal" text-anchor="start">姿态速度，为 0 时就是纯权重正则</text>
+<polyline points="350,255 388,255" fill="none" stroke="#57606a" stroke-width="1.8" marker-end="url(#ah)"/>
+<polyline points="710,255 748,255" fill="none" stroke="#57606a" stroke-width="1.8" marker-end="url(#ah)"/>
+<rect x="15" y="432" width="1170" height="528" rx="14" fill="#fffaf0" stroke="#e4c590" stroke-width="1"/>
+<text x="150" y="462" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="16" fill="#1f2328" font-weight="bold" text-anchor="start">② 分层求解：HQPSolver.solve(problem)</text>
+<text x="510" y="462" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="13" fill="#57606a" font-weight="normal" text-anchor="start">（同一个 WBCProblem 换成 WLSSolver / WQPSolver 也能解，只改一行）</text>
+<polyline points="960,400 960,420 125,420 125,500" fill="none" stroke="#57606a" stroke-width="1.8" marker-end="url(#ah)"/>
+<rect x="30" y="502" width="190" height="130" rx="10" fill="#ffffff" stroke="#d97706" stroke-width="1.5"/>
+<text x="45" y="527" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="14" fill="#1f2328" font-weight="bold" text-anchor="start">按 priority 分层</text>
+<text x="45" y="552" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12.5" fill="#57606a" font-weight="normal" text-anchor="start">数字越小越优先</text>
+<text x="45" y="574" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12.5" fill="#57606a" font-weight="normal" text-anchor="start">同一 priority 的任务</text>
+<text x="45" y="594" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12.5" fill="#57606a" font-weight="normal" text-anchor="start">和软约束放进同一层</text>
+<text x="45" y="616" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12.5" fill="#1f2328" font-weight="normal" text-anchor="start">→ 第 1 … K 层</text>
+<polyline points="220,567 253,567" fill="none" stroke="#57606a" stroke-width="1.8" marker-end="url(#ah)"/>
+<rect x="255" y="490" width="600" height="330" rx="10" fill="#fff4e5" stroke="#d97706" stroke-width="2"/>
+<text x="270" y="515" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="15" fill="#1f2328" font-weight="bold" text-anchor="start">第 k 层（从高到低，k = 1 … K）</text>
+<text x="270" y="543" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="13" fill="#1f2328" font-weight="bold" text-anchor="start">min</text>
+<text x="310" y="543" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="13" fill="#1f2328" font-weight="normal" text-anchor="start">½ Σ‖J_i v − ẋ_d,i‖²_W</text>
+<text x="560" y="543" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12.5" fill="#57606a" font-weight="normal" text-anchor="start">本层的任务</text>
+<text x="310" y="567" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="13" fill="#1f2328" font-weight="normal" text-anchor="start">+ ½ vᵀ(λI + W_p) v</text>
+<text x="560" y="567" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12.5" fill="#57606a" font-weight="normal" text-anchor="start">权重正则：每层都加，起阻尼作用</text>
+<text x="310" y="591" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="13" fill="#1f2328" font-weight="normal" text-anchor="start">− (W_p v_posture)ᵀ v</text>
+<text x="560" y="591" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12.5" fill="#57606a" font-weight="normal" text-anchor="start">回中 / 斥力：只在最低层（高层不加）</text>
+<text x="310" y="615" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="13" fill="#1f2328" font-weight="normal" text-anchor="start">+ w_lin Σs + ½ w_quad ‖s‖²</text>
+<text x="560" y="615" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12.5" fill="#57606a" font-weight="normal" text-anchor="start">本层软约束的松弛代价</text>
+<text x="270" y="645" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="13" fill="#1f2328" font-weight="bold" text-anchor="start">s.t.</text>
+<text x="310" y="645" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="13" fill="#1f2328" font-weight="normal" text-anchor="start">lb ≤ v ≤ ub，硬约束 lbA ≤ A v ≤ ubA</text>
+<text x="310" y="663" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12" fill="#57606a" font-weight="normal" text-anchor="start">每层都有</text>
+<text x="310" y="687" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="13" fill="#1f2328" font-weight="normal" text-anchor="start">V_rᵀ v = V_rᵀ v* ± lock_tol</text>
+<text x="310" y="705" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12" fill="#57606a" font-weight="normal" text-anchor="start">上层锁定：上层做到的不能被破坏</text>
+<text x="310" y="729" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="13" fill="#1f2328" font-weight="normal" text-anchor="start">lb_S − s* ≤ S v ≤ ub_S + s*</text>
+<text x="310" y="747" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12" fill="#57606a" font-weight="normal" text-anchor="start">上层软约束按 s* 放宽后当硬约束</text>
+<rect x="270" y="772" width="570" height="36" rx="6" fill="#ffffff" stroke="#d97706" stroke-width="1"/>
+<text x="555" y="795" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12.5" fill="#1f2328" font-weight="normal" text-anchor="middle">qpOASES（每层一个对象，按 priority 缓存、逐周期热启动）→ v_k, s_k</text>
+<rect x="895" y="490" width="275" height="120" rx="10" fill="#ffffff" stroke="#d97706" stroke-width="1.5"/>
+<text x="910" y="515" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="14" fill="#1f2328" font-weight="bold" text-anchor="start">锁定本层，进入下一层</text>
+<text x="910" y="540" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12.5" fill="#57606a" font-weight="normal" text-anchor="start">本层任务中权重 &gt; 0 的行</text>
+<text x="910" y="560" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12.5" fill="#57606a" font-weight="normal" text-anchor="start">加入锁定集，SVD 压缩成</text>
+<text x="910" y="580" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12.5" fill="#57606a" font-weight="normal" text-anchor="start">线性无关的行 V_rᵀ</text>
+<text x="910" y="600" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12.5" fill="#57606a" font-weight="normal" text-anchor="start">软约束违反量固定为 s*</text>
+<polyline points="855,550 893,550" fill="none" stroke="#57606a" stroke-width="1.8" marker-end="url(#ah)"/>
+<polyline points="1032,610 1032,640 870,640 870,600 857,600" fill="none" stroke="#57606a" stroke-width="1.8" marker-end="url(#ah)"/>
+<text x="880" y="658" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="12.5" fill="#b45309" font-weight="normal" text-anchor="start">k ← k + 1</text>
+<rect x="895" y="680" width="275" height="52" rx="10" fill="#fdecea" stroke="#cf222e" stroke-width="1.5" stroke-dasharray="6 4"/>
+<text x="910" y="702" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12.5" fill="#1f2328" font-weight="normal" text-anchor="start">锁定后已没有剩余自由度</text>
+<text x="910" y="722" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12.5" fill="#57606a" font-weight="normal" text-anchor="start">→ 跳过下面所有层</text>
+<rect x="895" y="746" width="275" height="62" rx="10" fill="#fdecea" stroke="#cf222e" stroke-width="1.5" stroke-dasharray="6 4"/>
+<text x="910" y="768" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12.5" fill="#1f2328" font-weight="normal" text-anchor="start">第 k &gt; 1 层求解失败</text>
+<text x="910" y="788" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12.5" fill="#57606a" font-weight="normal" text-anchor="start">→ 保留上一层的解，标记 degraded</text>
+<polyline points="855,706 893,706" fill="none" stroke="#cf222e" stroke-width="1.8" stroke-dasharray="6 4" marker-end="url(#ah)"/>
+<polyline points="855,776 893,776" fill="none" stroke="#cf222e" stroke-width="1.8" stroke-dasharray="6 4" marker-end="url(#ah)"/>
+<polyline points="555,820 555,868" fill="none" stroke="#57606a" stroke-width="1.8" marker-end="url(#ah)"/>
+<text x="565" y="850" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12.5" fill="#57606a" font-weight="normal" text-anchor="start">最后求解成功的一层的 v</text>
+<rect x="255" y="870" width="600" height="70" rx="10" fill="#e6f4ea" stroke="#2da44e" stroke-width="1.5"/>
+<text x="270" y="895" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="14" fill="#1a7f37" font-weight="bold" text-anchor="start">WBCResult</text>
+<text x="270" y="920" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12.5" fill="#1f2328" font-weight="normal" text-anchor="start">v；每层的 status / residual / n_locked；degraded；软约束的 slack</text>
+<polyline points="855,905 893,905" fill="none" stroke="#57606a" stroke-width="1.8" marker-end="url(#ah)"/>
+<rect x="895" y="870" width="275" height="70" rx="10" fill="#ffffff" stroke="#2da44e" stroke-width="1.5"/>
+<text x="910" y="895" font-family="SFMono-Regular, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="13" fill="#1f2328" font-weight="normal" text-anchor="start">q_cmd = q + v·dt</text>
+<text x="910" y="920" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Noto Sans SC, sans-serif" font-size="12.5" fill="#57606a" font-weight="normal" text-anchor="start">→ 发给位置执行器（应用层）</text>
+</svg>

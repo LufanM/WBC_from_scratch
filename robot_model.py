@@ -16,13 +16,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.join(HERE, "assets", "galaxea_r1pro_standalone")
 URDF_PATH = os.path.join(PKG, "galaxea_r1pro.urdf")
 MJCF_PATH = os.path.join(PKG, "galaxea_r1pro.xml")
-# The camera variant (convert_urdf.py --cameras) is the same robot plus the
+# The camera variant (tools/convert_urdf.py --cameras) is the same robot plus the
 # RealSense wrist meshes, so it can be dropped in for screenshots and demos:
 #     R1PRO_MJCF=.../galaxea_r1pro_cameras.xml python3 simulate.py
 MJCF_PATH = os.environ.get("R1PRO_MJCF") or MJCF_PATH
 
 # --- controlled DOFs -------------------------------------------------------
-# Mobile base: three real joints in the MJCF (see convert_urdf.py), so the WBC
+# Mobile base: three real joints in the MJCF (see tools/convert_urdf.py), so the WBC
 # plans them like any other DOF.
 BASE_JOINTS = ["base_x", "base_y", "base_yaw"]
 TORSO_JOINTS = [f"torso_joint{i}" for i in range(1, 5)]
@@ -32,9 +32,19 @@ RIGHT_ARM_JOINTS = [f"right_joint{i}" for i in range(1, 8)]
 LEFT_EE_SITE = "left_ee"
 RIGHT_EE_SITE = "right_ee"
 
+# Extra frames the whole-body controller can track (WholeBodyController(frames=...)):
+# the torso top link, and the mobile base, which only moves in x, y and yaw
+# (rz = rotation about world z).
+TORSO_BODY = "torso_link4"
+BASE_BODY = "base_link"
+R1_FRAMES = {
+    "torso": {"body": TORSO_BODY},
+    "base": {"body": BASE_BODY, "components": ("x", "y", "rz")},
+}
+
 # Home posture lives with the converter, which linearizes the servo gains about
 # it; re-exported here so runtime code has one obvious import site.
-from convert_urdf import HOME_POSE  # noqa: E402  (re-export)
+from tools.convert_urdf import HOME_POSE  # noqa: E402  (re-export)
 
 MARKER_COLORS = [
     (0.9, 0.15, 0.15, 0.9),
@@ -51,7 +61,7 @@ def ensure_mjcf(force=False):
     stale = (not os.path.exists(MJCF_PATH) or
              os.path.getmtime(MJCF_PATH) < os.path.getmtime(URDF_PATH))
     if force or stale:
-        from convert_urdf import convert
+        from tools.convert_urdf import convert
         convert(URDF_PATH, MJCF_PATH)
     return MJCF_PATH
 
