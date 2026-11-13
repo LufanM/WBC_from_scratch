@@ -1,4 +1,4 @@
-"""demo_hqp_interactive.py（迁移自 AlphaBrainSystem 的 mujoco_hqp_interactive）仿真记录的绘图脚本。
+"""demo_hqp_interactive.py仿真记录的绘图脚本。
 
 仿真程序加 --data-record 时只记录数据，记录写到仓库根目录的 hqp_sim_trace/<时间>/trace.csv；
 绘图都由本脚本完成。
