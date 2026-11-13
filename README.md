@@ -56,7 +56,7 @@
 
 <img src="README_pics/hqp_interactive.webp" width="100%" alt="HQP 交互仿真">
 
-迁移自 AlphaBrainSystem 的 `mujoco_hqp_interactive.cpp`，操作方式、前四种控制模式（手 / 躯干的 跟踪 / 自由 / 冻结 组合）、状态机、插值、初始姿态的设计、无窗口自检和数据记录格式都与 C++ 版一致，求解换成本仓库的 `WholeBodyController(solver="hqp")`：躯干安全盒在第 -1 层，双手在第 0 层，躯干在第 1 层，底盘在第 2 层。相比 C++ 版，这里增加了底盘的控制和交互。默认机器人是 `assets/` 中原始 URDF 的 R1 Pro，完整说明见 `demo_hqp_interactive.py` 开头。
+迁前四种控制模式（手 / 躯干的 跟踪 / 自由 / 冻结 组合）、状态机、插值、初始姿态的设计、无窗口自检和数据记录格式都与 C++ 版一致，求解换成本仓库的 `WholeBodyController(solver="hqp")`：躯干安全盒在第 -1 层，双手在第 0 层，躯干在第 1 层，底盘在第 2 层。相比 C++ 版，这里增加了底盘的控制和交互。默认机器人是 `assets/` 中原始 URDF 的 R1 Pro，完整说明见 `demo_hqp_interactive.py` 开头。
 
 视频依次演示（机身 40% 透明，便于看到目标球）：
 
@@ -112,7 +112,7 @@
 | `demo_nullspace_scenarios.py` | 零空间投影：双手固定 + 肘部 / 底盘协同运动 |
 | `demo_nullspace_real.py` | 零空间投影：末端固定 + 肘部 / 躯干自由运动 |
 | `demo_arm_angle_swivel.py` | 标准臂角 ψ 零空间控制（解析雅可比 + 有限差分校验），可画出臂角的几何量 |
-| `demo_hqp_interactive.py` | HQP 交互仿真（迁移自 AlphaBrainSystem，机器人由 `robots.py` 配置）：拖拽目标、四种控制模式、无窗口自检 |
+| `demo_hqp_interactive.py` | HQP 交互仿真（：拖拽目标、四种控制模式、无窗口自检 |
 | `nullspace_example.py` | 加权与零空间方法的数值对比（非真实机器人） |
 
 **测试**
@@ -227,6 +227,8 @@ WQP 在速度饱和时保持运动方向，所以收敛更快。`solver="wls"` �
 
 * ⏳阻尼下增大误差，误差也即纠正比例的计算原理
 * ⏳到达目标后，目标点不动，但身体会飘移的问题
+* ⏳质心约束，防倾覆
+* 
 
 
 

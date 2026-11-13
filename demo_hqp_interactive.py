@@ -1,10 +1,6 @@
 """
 demo_hqp_interactive.py —— 可拖拽目标点的 HQP / WBC 交互仿真（躯干 + 双臂，可选底盘）
 
-迁移自 AlphaBrainSystem 的 src/spinal/mujoco/mujoco_hqp_interactive.cpp：操作方式、四种控制模式、
-状态机、插值、HUD、--demo 自检和 --data-record 记录格式都保持一致；求解器换成本仓库的
-wbc_function（WholeBodyController + HQPSolver），不再依赖 QPPlanner / yaml。
-
 机器人由 robots.py 中的 RobotConfig 描述（关节分组、末端、躯干坐标系、初始姿态、安全盒），
 默认是本仓库 assets/ 中原始 URDF 的 Galaxea R1 Pro；换机器人只需换配置（--robot）。
 
@@ -407,7 +403,6 @@ def load_sim(robot: robots.RobotConfig, control_dt):
 
 def interactive_home(robot: robots.RobotConfig, opt: Options):
     """本程序的初始姿态：从机器人配置的 home 出发，R1 再按 home_torso_squat、home_arm 覆盖。
-    默认值参照 AlphaBrainSystem mujoco_hqp_interactive 的初始姿态：
 
     躯干   前三个俯仰关节取 (a, -2a, -a)，a = 30°：微蹲，躯干保持直立（第 3 关节转轴为 -y，
            三者的俯仰正好抵消），上下、前后都留有活动余量；腰部转动为 0
