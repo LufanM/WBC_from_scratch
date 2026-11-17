@@ -11,7 +11,7 @@
 ![Python](https://img.shields.io/badge/Python-3-3776ab)
 ![Robot](https://img.shields.io/badge/Robot-Galaxea%20R1%20Pro-2da44e)
 
-[本仓库做什么](#本仓库做什么) · [文档](#文档) · [演示](#演示臂角零空间控制) · [文件说明](#文件说明) · [实验与验证](#实验与验证)
+[本仓库做什么](#本仓库做什么) · [环境安装](#环境安装) · [文档](#文档) · [演示](#演示臂角零空间控制) · [文件说明](#文件说明) · [实验与验证](#实验与验证)
 
 </div>
 
@@ -27,6 +27,51 @@
 |---|---|---|
 | **加权** | ✅ **方法1：加权最小二乘** — `wbc_function/wls_solver.py` | ✅ **方法3：加权 QP（WQP）** — `wbc_function/wqp_solver.py`（qpOASES） |
 | **严格分层** | ✅ **方法2：零空间投影** — 演示见 `demo_nullspace_scenarios.py`、`demo_nullspace_real.py`、`demo_arm_angle_swivel.py` | ✅ **方法4：分层 QP（HQP）** — `wbc_function/hqp_solver.py`（qpOASES，逐层求解）；交互演示 `demo_hqp_interactive.py` |
+
+## 环境安装
+
+推荐用 conda 创建独立环境（Python 3.10+，MuJoCo 3.x）。所有依赖装在同一个环境里，`qpOASES` 会被自动找到：
+
+```bash
+# 1. 创建并激活环境（MuJoCo / NumPy / Matplotlib 等都在 conda-forge 上）
+conda create -n wbc -c conda-forge python=3.10 mujoco numpy matplotlib pillow
+conda activate wbc
+
+# 2. 安装 qpOASES（加权 QP、分层 QP 和 HQP 交互演示需要）
+conda install -c conda-forge qpoases
+
+# 3. 获取代码并自检
+git clone git@github.com:LufanM/WBC_from_scratch.git
+cd WBC_from_scratch
+python simulate.py --headless          # 无窗口跑一次闭环到达，装好后应输出 PASS
+```
+
+依赖一览：
+
+| 依赖 | 用途 | 说明 |
+|---|---|---|
+| Python ≥ 3.10 | 运行代码 | 代码使用 3.10 风格的类型标注 |
+| `mujoco`（3.x） | 模型加载、正运动学、物理仿真 | conda-forge 或 pip 均可 |
+| `numpy` | 线性代数 | 必需 |
+| `qpoases` | 加权 QP / 分层 QP 的求解器 | 只跑 WLS 和零空间投影演示时不需要 |
+| `matplotlib` | 数值对比图、`tools/` 中的可视化 | 演示与工具需要 |
+| `pillow` | `tools/record_readme_videos.py` 生成本 README 的动图 | 可选 |
+| `g++` | 首次运行 QP 求解器时编译 `wbc_function/qpoases_bridge.cpp` | 用到 QP 时需要 |
+
+关于 qpOASES 的三点说明：
+
+- `conda install -c conda-forge qpoases` 会把 `include/qpOASES.hpp` 和 `lib/libqpOASES.so` 装进当前环境（`$CONDA_PREFIX`）。`wbc_function/qpoases_interface.py` 按 `QPOASES_ROOT` → 当前 conda 环境 → `~/miniconda3` 等常见位置依次查找，所以**装在激活的环境里即可直接使用**。
+- 首次运行 QP 求解器时会调用 `g++` 把桥接库编译到 `wbc_function/_build/`（不入库；换环境或改源码后会自动重新编译）。g++ 用系统包安装即可，如 Ubuntu 上 `sudo apt install build-essential`，也可以 `conda install -c conda-forge gxx_linux-64`。
+- 如果 qpOASES 装在别处（例如手动编译），设置 `export QPOASES_ROOT=/path/to/qpOASES`，该目录下需要有 `include/` 和 `lib/`。
+
+**无图形界面的服务器**：带窗口的演示需要图形界面，纯命令行环境用无窗口模式：
+
+```bash
+python simulate.py --headless
+python demo_hqp_interactive.py --demo     # HQP 交互仿真的无窗口自检
+```
+
+如果 conda-forge 的 MuJoCo 版本在你的机器上不兼容，可以改用 pip 安装官方发布的 `mujoco`（`pip install mujoco`），其余依赖仍用 conda 安装。
 
 ## 文档
 
@@ -56,7 +101,7 @@
 
 <img src="README_pics/hqp_interactive.webp" width="100%" alt="HQP 交互仿真">
 
-迁前四种控制模式（手 / 躯干的 跟踪 / 自由 / 冻结 组合）、状态机、插值、初始姿态的设计、无窗口自检和数据记录格式都与 C++ 版一致，求解换成本仓库的 `WholeBodyController(solver="hqp")`：躯干安全盒在第 -1 层，双手在第 0 层，躯干在第 1 层，底盘在第 2 层。相比 C++ 版，这里增加了底盘的控制和交互。默认机器人是 `assets/` 中原始 URDF 的 R1 Pro，完整说明见 `demo_hqp_interactive.py` 开头。
+前四种控制模式（手 / 躯干的 跟踪 / 自由 / 冻结 组合）、状态机、插值、初始姿态的设计、无窗口自检和数据记录，求解用 `WholeBodyController(solver="hqp")`：躯干安全盒在第 -1 层，双手在第 0 层，躯干在第 1 层，底盘在第 2 层。默认机器人是 `assets/` 中原始 URDF 的 R1 Pro，完整说明见 `demo_hqp_interactive.py` 开头。
 
 视频依次演示（机身 40% 透明，便于看到目标球）：
 
@@ -67,9 +112,9 @@
 5. **回到初始姿态**：所有关节在关节空间平滑回位；
 6. **拖动底盘**：模式 9 下手臂、躯干冻结，底盘走到新位置并转向。
 
-主要功能：Ctrl + 拖动目标球（可锁定沿 X / Y / Z 轴），数字键切换 9 种控制模式（1~4 底盘不介入，5~9 底盘介入），双手联动（端托盘）、放置点、压力测试点、回初始姿态、机身透明等快捷键；底盘 x、y、yaw 三个自由度也可控，可拖动底盘球设置位置和朝向；有多个跟踪目标时依次设置（拖动或按空格保持不变），设完后一起执行；大球显示目标、小球显示当前，都带姿态坐标系；可切换为加权 QP / 加权最小二乘对照；无窗口自检（四种模式 + A/B 对照）；记录每个周期的关节和末端数据，用 `tools/plot_trace.py` 画图。
+主要功能：Ctrl + 拖动目标球（可锁定沿 X / Y / Z 轴），数字键切换 9 种控制模式（1\~4 底盘不介入，5\~9 底盘介入），双手联动（端托盘）、放置点、压力测试点、回初始姿态、机身透明等快捷键；底盘 x、y、yaw 三个自由度也可控，可拖动底盘球设置位置和朝向；有多个跟踪目标时依次设置（拖动或按空格保持不变），设完后一起执行；大球显示目标、小球显示当前，都带姿态坐标系；可切换为加权 QP / 加权最小二乘对照；无窗口自检（四种模式 + A/B 对照）；记录每个周期的关节和末端数据，用 `tools/plot_trace.py` 画图。
 
-**换机器人（适配其他 URDF）**：程序里没有写死任何机器人信息，全部来自 [robots.py](robots.py) 的 `RobotConfig`（关节分组、末端、躯干坐标系、默认姿态）；初始姿态、安全盒、放置点距离等属于交互程序自己的参数，在 `demo_hqp_interactive.py` 的 `Options` 中设置，可通过命令行或 JSON 配置修改。任意 URDF 可以用通用加载器 `robots.load_urdf()` 加载，它在加载时补上执行器（增益按关节惯量整定）、末端 site、重力补偿、地面，可选平面底盘。接入新机器人写一个 JSON 配置即可（格式见 `robots.load_config_file`）；内置的 `r1_urdf` 就是用通用加载器加载同一个 R1 URDF。
+**换机器人（适配其他 URDF）**：(还未验证，有需求的可以自己结合AI进行修改)程序里没有写死任何机器人信息，全部来自 [robots.py](robots.py) 的 `RobotConfig`（关节分组、末端、躯干坐标系、默认姿态）；初始姿态、安全盒、放置点距离等属于交互程序自己的参数，在 `demo_hqp_interactive.py` 的 `Options` 中设置，可通过命令行或 JSON 配置修改。任意 URDF 可以用通用加载器 `robots.load_urdf()` 加载，它在加载时补上执行器（增益按关节惯量整定）、末端 site、重力补偿、地面，可选平面底盘。接入新机器人写一个 JSON 配置即可（格式见 `robots.load_config_file`）；内置的 `r1_urdf` 就是用通用加载器加载同一个 R1 URDF。
 
 ## 文件说明
 
@@ -216,6 +261,7 @@ WQP 在速度饱和时保持运动方向，所以收敛更快。`solver="wls"` �
 - ✅ 分层 QP：末端任务严格优先（`wbc_function.HQPSolver`，[QP_WBC.md §8](QP_WBC.md#8-分层-qphqp)）
 - ✅ 可拖拽目标点的 HQP 交互仿真，适配多种 URDF（`demo_hqp_interactive.py`、`robots.py`）
 - ⏳ 把 `simulate.py`、`demo_*.py` 迁移到 `wbc_function`
+- ⏳ 避障与轨迹跟踪控制
 - ⏳ 差速轮底盘模型（非完整约束）
 - ⏳ 实时碰撞约束
 - ⏳ MPC 轨迹优化（多步预测）
@@ -226,10 +272,9 @@ WQP 在速度饱和时保持运动方向，所以收敛更快。`solver="wls"` �
 ### 待优化项
 
 * ⏳阻尼下增大误差，误差也即纠正比例的计算原理
-* ⏳到达目标后，目标点不动，但身体会飘移的问题
-* ⏳质心约束，防倾覆
-* 
-
+* ✅到达目标后，目标点不动，但身体会飘移的问题
+* ⏳质心约束，防倾覆，
+约束与否的对比图
 
 
 ### MuJoCo 说明

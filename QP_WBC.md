@@ -3,7 +3,7 @@
 > 本文讲运动学 WBC 中按“加权”或“分层 QP”求解的三种方法：本项目实现的**加权最小二乘**（§1），以及带不等式约束的**加权 QP（WQP）**（§7）和**分层 QP（HQP）**（§8）。
 > 方法分类、零空间投影的推导见 [WBC_PRINCIPLES.md](WBC_PRINCIPLES.md)，本文不再重复，只在用到时给出链接。运行示例与验证结果见 [README.md](README.md#实验与验证)。
 
----
+
 
 ## 目录
 
@@ -20,6 +20,7 @@
 10. [求解器：qpOASES](#10-求解器qpoases)
 11. [代码结构（wbc_function/）](#11-代码结构wbc_function)
 12. [调参与诊断](#12-调参与诊断)
+13. [参考文献](#13-参考文献)
 - [附录 A 公式速查](#附录-a-公式速查)
 - [附录 B 符号与单位](#附录-b-符号与单位)
 - [附录 C 加权最小二乘的闭式解推导](#附录-c-加权最小二乘的闭式解推导)
@@ -1412,6 +1413,18 @@ wbc.add_constraint("torso_box", torso_box)
 | HQP 高层残差不为 0 | 上层任务本身做不到（受限位等约束），或锁定约束退化 | 看该层单独求解的残差；处理线性相关的行 |
 
 ---
+
+## 13. 参考文献
+
+> [1].[【HQP】基于分层二次规划的双臂机器人全身协同控制 ]( https://www.guyuehome.com/detail?id=2081765351403581442)
+>
+> [2].[【HQP】基于分层二次规划的二阶机械臂避障与轨迹跟踪控制](https://www.guyuehome.com/detail?id=1997190181674840065)
+>
+> [3].[七自由度冗余机械臂扩展任务逆运动学：扩展雅可比法](https://cloud.tencent.com/developer/article/1737044?policyId=1004)
+>
+> [4].Li Q, Pang Y, Cai W, et al. An overview of multi-task control for redundant robot based on quadratic programming[C]//Chinese Intelligent Automation Conference. Singapore: Springer Nature Singapore, 2023: 641-666.
+
+
 
 ## 附录 A 公式速查
 

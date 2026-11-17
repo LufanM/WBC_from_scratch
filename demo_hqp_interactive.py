@@ -935,7 +935,7 @@ class InteractiveController:
         if self.mode.torso == TORSO_TRACK:
             seg = self.parts[TORSO].seg
             p = seg.sample(now)
-            if self.opt.torso_leash > 0.0:      # 目标牵引限幅（C++ 版的 --torso-leash）
+            if self.opt.torso_leash > 0.0:      # 目标牵引限幅
                 cur = self.measured(TORSO)
                 d = p - cur
                 if np.linalg.norm(d) > self.opt.torso_leash:
@@ -1012,7 +1012,7 @@ class InteractiveController:
                      f"[{self.num4(self.arm_sigma[1])}] m/rad  lambda [{self.num4(self.wbc.lambda_reg)}]")
         print("\n".join(lines), flush=True)
 
-    # ---- --data-record（列与 C++ 版相同，tools/plot_trace.py 可直接画）
+    # ---- --data-record（tools/plot_trace.py 可直接画）
     def enable_trace(self, path):
         self.trace = open(path, "w")
         cols = ["t", "mode"] + [f"cmd_{n}" for n in self.joints] + \
