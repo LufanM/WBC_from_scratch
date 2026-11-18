@@ -11,7 +11,7 @@
 ![Python](https://img.shields.io/badge/Python-3-3776ab)
 ![Robot](https://img.shields.io/badge/Robot-Galaxea%20R1%20Pro-2da44e)
 
-[本仓库做什么](#本仓库做什么) · [环境安装](#环境安装) · [文档](#文档) · [演示](#演示臂角零空间控制) · [文件说明](#文件说明) · [实验与验证](#实验与验证)
+[本仓库做什么](#本仓库做什么) · [文档](#文档) · [演示](#演示臂角零空间控制) · [环境安装](#环境安装) · [文件说明](#文件说明) · [实验与验证](#实验与验证)
 
 </div>
 
@@ -26,52 +26,7 @@
 | | 无不等式约束（闭式解） | 有不等式约束（QP 求解器） |
 |---|---|---|
 | **加权** | ✅ **方法1：加权最小二乘** — `wbc_function/wls_solver.py` | ✅ **方法3：加权 QP（WQP）** — `wbc_function/wqp_solver.py`（qpOASES） |
-| **严格分层** | ✅ **方法2：零空间投影** — 演示见 `demo_nullspace_scenarios.py`、`demo_nullspace_real.py`、`demo_arm_angle_swivel.py` | ✅ **方法4：分层 QP（HQP）** — `wbc_function/hqp_solver.py`（qpOASES，逐层求解）；交互演示 `demo_hqp_interactive.py` |
-
-## 环境安装
-
-推荐用 conda 创建独立环境（Python 3.10+，MuJoCo 3.x）。所有依赖装在同一个环境里，`qpOASES` 会被自动找到：
-
-```bash
-# 1. 创建并激活环境（MuJoCo / NumPy / Matplotlib 等都在 conda-forge 上）
-conda create -n wbc -c conda-forge python=3.10 mujoco numpy matplotlib pillow
-conda activate wbc
-
-# 2. 安装 qpOASES（加权 QP、分层 QP 和 HQP 交互演示需要）
-conda install -c conda-forge qpoases
-
-# 3. 获取代码并自检
-git clone git@github.com:LufanM/WBC_from_scratch.git
-cd WBC_from_scratch
-python simulate.py --headless          # 无窗口跑一次闭环到达，装好后应输出 PASS
-```
-
-依赖一览：
-
-| 依赖 | 用途 | 说明 |
-|---|---|---|
-| Python ≥ 3.10 | 运行代码 | 代码使用 3.10 风格的类型标注 |
-| `mujoco`（3.x） | 模型加载、正运动学、物理仿真 | conda-forge 或 pip 均可 |
-| `numpy` | 线性代数 | 必需 |
-| `qpoases` | 加权 QP / 分层 QP 的求解器 | 只跑 WLS 和零空间投影演示时不需要 |
-| `matplotlib` | 数值对比图、`tools/` 中的可视化 | 演示与工具需要 |
-| `pillow` | `tools/record_readme_videos.py` 生成本 README 的动图 | 可选 |
-| `g++` | 首次运行 QP 求解器时编译 `wbc_function/qpoases_bridge.cpp` | 用到 QP 时需要 |
-
-关于 qpOASES 的三点说明：
-
-- `conda install -c conda-forge qpoases` 会把 `include/qpOASES.hpp` 和 `lib/libqpOASES.so` 装进当前环境（`$CONDA_PREFIX`）。`wbc_function/qpoases_interface.py` 按 `QPOASES_ROOT` → 当前 conda 环境 → `~/miniconda3` 等常见位置依次查找，所以**装在激活的环境里即可直接使用**。
-- 首次运行 QP 求解器时会调用 `g++` 把桥接库编译到 `wbc_function/_build/`（不入库；换环境或改源码后会自动重新编译）。g++ 用系统包安装即可，如 Ubuntu 上 `sudo apt install build-essential`，也可以 `conda install -c conda-forge gxx_linux-64`。
-- 如果 qpOASES 装在别处（例如手动编译），设置 `export QPOASES_ROOT=/path/to/qpOASES`，该目录下需要有 `include/` 和 `lib/`。
-
-**无图形界面的服务器**：带窗口的演示需要图形界面，纯命令行环境用无窗口模式：
-
-```bash
-python simulate.py --headless
-python demo_hqp_interactive.py --demo     # HQP 交互仿真的无窗口自检
-```
-
-如果 conda-forge 的 MuJoCo 版本在你的机器上不兼容，可以改用 pip 安装官方发布的 `mujoco`（`pip install mujoco`），其余依赖仍用 conda 安装。
+| **严格分层** | ✅ **方法2：零空间投影** — 演示见 `demo_arm_angle_swivel.py` | ✅ **方法4：分层 QP（HQP）** — `wbc_function/hqp_solver.py`（qpOASES，逐层求解）；交互演示 `demo_hqp_interactive.py` |
 
 ## 文档
 
@@ -116,6 +71,19 @@ python demo_hqp_interactive.py --demo     # HQP 交互仿真的无窗口自检
 
 **换机器人（适配其他 URDF）**：(还未验证，有需求的可以自己结合AI进行修改)程序里没有写死任何机器人信息，全部来自 [robots.py](robots.py) 的 `RobotConfig`（关节分组、末端、躯干坐标系、默认姿态）；初始姿态、安全盒、放置点距离等属于交互程序自己的参数，在 `demo_hqp_interactive.py` 的 `Options` 中设置，可通过命令行或 JSON 配置修改。任意 URDF 可以用通用加载器 `robots.load_urdf()` 加载，它在加载时补上执行器（增益按关节惯量整定）、末端 site、重力补偿、地面，可选平面底盘。接入新机器人写一个 JSON 配置即可（格式见 `robots.load_config_file`）；内置的 `r1_urdf` 就是用通用加载器加载同一个 R1 URDF。
 
+## 环境安装
+
+推荐用 conda 创建独立环境（Python 3.10+，MuJoCo 3.x），依赖都装在同一个环境里：
+
+```bash
+conda create -n wbc -c conda-forge python=3.10 mujoco numpy matplotlib
+conda activate wbc
+conda install -c conda-forge qpoases    # 加权 QP / 分层 QP 需要；只跑 WLS 时可跳过
+python simulate.py --headless           # 无窗口自检，装好后应输出 PASS
+```
+
+`qpOASES` 装进 `$CONDA_PREFIX` 后会被 `wbc_function` 自动找到；首次使用 QP 求解器时会调用 g++ 自动编译桥接库（缺 g++ 时安装 `build-essential`，qpOASES 装在别处时设置 `QPOASES_ROOT`）。`Pillow` 只在 `tools/record_readme_videos.py` 录制 README 动图时需要。
+
 ## 文件说明
 
 **根目录**
@@ -154,8 +122,6 @@ python demo_hqp_interactive.py --demo     # HQP 交互仿真的无窗口自检
 | 文件 | 说明 |
 |---|---|
 | `simulate.py` | 单臂到达仿真 + 自动判定（运动学 / 动态双模式） |
-| `demo_nullspace_scenarios.py` | 零空间投影：双手固定 + 肘部 / 底盘协同运动 |
-| `demo_nullspace_real.py` | 零空间投影：末端固定 + 肘部 / 躯干自由运动 |
 | `demo_arm_angle_swivel.py` | 标准臂角 ψ 零空间控制（解析雅可比 + 有限差分校验），可画出臂角的几何量 |
 | `demo_hqp_interactive.py` | HQP 交互仿真（：拖拽目标、四种控制模式、无窗口自检 |
 | `nullspace_example.py` | 加权与零空间方法的数值对比（非真实机器人） |
