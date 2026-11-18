@@ -186,7 +186,7 @@ class WBCProblem:
         return H, g
 
     def objective(self):
-        """返回目标函数 1/2 v^T H v + g^T v 中的 (H, g)。
+        """返回目标函数 1/2 v^T H v + g^T v 中的 (H, g)。QP形式展开
 
             H = sum_i J_i^T W_i J_i + λI + W_p             （即 §1.4 的 A）
             g = -sum_i J_i^T W_i xdot_i - W_p v_posture    （即 §1.4 的 -b）
